@@ -30,3 +30,12 @@ publish/
 
 # Docker
 uniflow_admin.db
+
+# Original Delphi projects (source reference only)
+*.rar
+*.exe
+*.dcu
+*.dll
+*.docx
+DisposeSample/
+SRM_ExportDisposesample/
