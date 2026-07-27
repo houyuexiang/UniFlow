@@ -1,0 +1,32 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.vs/
+*.cache
+*.dtbcache.v2
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Publish
+publish/
+
+# SQLite DB
+*.db
+*.db-shm
+*.db-wal
+
+# Docker
+uniflow_admin.db
