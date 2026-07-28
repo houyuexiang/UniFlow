@@ -1,0 +1,30 @@
+services:
+  uniflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: uniflow
+    restart: unless-stopped
+    ports:
+      - "5100:5100"
+    volumes:
+      - uniflow_config:/app/config
+      - uniflow_logs:/app/logs
+      - uniflow_data:/app/DisposeFile
+      - uniflow_db:/app/uniflow_admin.db
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5100
+      - UniFlow__Database__Host=${MYSQL_HOST:-192.168.1.200}
+      - UniFlow__Database__Port=${MYSQL_PORT:-3306}
+      - UniFlow__Database__User=${MYSQL_USER:-root}
+      - UniFlow__Database__Password=${MYSQL_PASSWORD:-root}
+      - UniFlow__Database__Database=${MYSQL_DATABASE:-flexlab}
+      - UniFlow__Aptio__Ip=${APTIO_IP:-192.168.1.200}
+      - UniFlow__WebAdmin__BindIp=0.0.0.0
+
+volumes:
+  uniflow_config:
+  uniflow_logs:
+  uniflow_data:
+  uniflow_db:

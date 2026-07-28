@@ -1,0 +1,26 @@
+[Unit]
+Description=UniFlow - Laboratory Automation Workflow Service (.NET 10)
+After=network.target mysql.service mariadb.service
+Wants=mysql.service
+
+[Service]
+Type=notify
+ExecStart=/usr/share/uniflow/UniFlow/UniFlow
+WorkingDirectory=/usr/share/uniflow/UniFlow
+Restart=on-failure
+RestartSec=10
+User=uniflow
+Group=uniflow
+Environment=ASPNETCORE_ENVIRONMENT=Production
+StandardOutput=journal
+StandardError=journal
+
+CapabilityBoundingSet=
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

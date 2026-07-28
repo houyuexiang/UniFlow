@@ -1,0 +1,16 @@
+# Docker ignore for UniFlow
+**/.git
+**/.gitignore
+**/.vs/
+**/obj/
+**/bin/
+**/.user
+**/.suo
+**/node_modules
+**/packages/
+*.log
+*.md
+Dockerfile
+docker-compose.yml
+docs/
+tests/
