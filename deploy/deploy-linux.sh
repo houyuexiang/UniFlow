@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/usr/share/uniflow"
-SRC_DIR="$(cd "$(dirname "$0")/../src" && pwd)"
+SRC_DIR="$(cd "$(dirname "$0")/../code/src" && pwd)"
 SERVICE_NAME="uniflow.service"
 BINARY="UniFlow"
 

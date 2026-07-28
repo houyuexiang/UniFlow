@@ -20,23 +20,23 @@ Thumbs.db
 logs/
 *.log
 
-# Publish
-publish/
+# Release artifacts
+release/publish/
+
+# Build outputs
+code/src/**/bin/
+code/src/**/obj/
+code/tests/**/bin/
+code/tests/**/obj/
 
 # SQLite DB
 *.db
 *.db-shm
 *.db-wal
-
-# Docker
 uniflow_admin.db
 
 # Original Delphi projects (source reference only)
-*.rar
-*.exe
-*.dcu
-*.dll
-*.docx
-DisposeSample/
-SRM_ExportDisposesample/.config/gh/*
-.config/
+archives/
+
+# IDE
+.config/gh/*

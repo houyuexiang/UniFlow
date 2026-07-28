@@ -2,7 +2,7 @@ services:
   uniflow:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile
     container_name: uniflow
     restart: unless-stopped
     ports:
