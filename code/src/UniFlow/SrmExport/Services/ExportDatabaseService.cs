@@ -45,8 +45,8 @@ public class ExportDatabaseService : IExportDatabaseService
                    t_location COLLATE latin1_swedish_ci AS Location,
                    update_time AS UpdateTime
             FROM t_sample
-            WHERE update_time >= DATE_FORMAT(curdate()-1,'%Y%m%d')
-              AND update_time < DATE_FORMAT(curdate(),'%Y%m%d')
+            WHERE update_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY),'%Y%m%d')
+              AND update_time < DATE_FORMAT(CURDATE(),'%Y%m%d')
               AND t_location LIKE @Loc
             """, new { Loc = location })).AsList();
     }
