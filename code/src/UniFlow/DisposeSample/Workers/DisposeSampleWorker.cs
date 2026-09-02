@@ -1,8 +1,9 @@
-using Microsoft.Extensions.Options;
+using System.Text.Json;
 using UniFlow.Common.Models;
 using UniFlow.Common.Services;
 using UniFlow.DisposeSample.Models;
 using UniFlow.DisposeSample.Services;
+using UniFlow.WebAdmin.Services;
 
 namespace UniFlow.DisposeSample.Workers;
 
@@ -13,13 +14,15 @@ public class DisposeSampleWorker : BackgroundService
     private readonly IDisposeDatabaseService _db;
     private readonly AptioCommandService _commands;
     private readonly SrmStatusDecoder _statusDecoder;
-    private readonly AptioConfig _aptio;
-    private readonly AptioAutoDisposeConfig _dc;
-    private readonly AptioAutoDeliverConfig? _dlv;
-    private readonly AptioAutoPriorityConfig? _prt;
-    private readonly HashSet<int> _runDays;
-    private readonly List<TimeRange> _timeRanges;
-    private readonly HashSet<string> _allowErrors;
+    private readonly HealthStore _health;
+    private FeatureConfig _features;
+    private AptioConfig _aptio = default!;
+    private AptioAutoDisposeConfig _dc = new();
+    private AptioAutoDeliverConfig? _dlv;
+    private AptioAutoPriorityConfig? _prt;
+    private HashSet<int> _runDays = new();
+    private List<TimeRange> _timeRanges = new();
+    private HashSet<string> _allowErrors = new();
     private SysStatus _state = SysStatus.None;
     private string? _preBarcode;
     private int _connectRetries;
@@ -30,28 +33,41 @@ public class DisposeSampleWorker : BackgroundService
         IDisposeDatabaseService db,
         AptioCommandService commands,
         SrmStatusDecoder statusDecoder,
-        IOptions<AptioConfig> aptioConfig,
-        IOptions<AptioAutoProcessConfig> autoProcessConfig)
+        HealthStore health)
     {
         _logger = logger;
         _socket = socket;
         _db = db;
         _commands = commands;
         _statusDecoder = statusDecoder;
-        _aptio = aptioConfig.Value;
-        _dc = autoProcessConfig.Value.Dispose ?? new();
-        _dlv = autoProcessConfig.Value.Deliver;
-        _prt = autoProcessConfig.Value.Priority;
+        _health = health;
+        RefreshConfig();
 
         _socket.Host = _aptio.Ip;
         _socket.Port = _aptio.Port;
+    }
 
-        _runDays = WorkTimeChecker.ParseRunDays(_dc.DiscardRunDate);
-        _timeRanges = WorkTimeChecker.ParseTimeRanges(_dc.DiscardTimeRange);
-
-        _allowErrors = new HashSet<string>(
-            _dc.AllowSrmErrorCode.Split(',', StringSplitOptions.TrimEntries)
-                .Where(c => !string.IsNullOrEmpty(c)));
+    private void RefreshConfig()
+    {
+        try
+        {
+            var json = File.ReadAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json"));
+            var doc = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
+            if (doc == null) return;
+            if (doc.TryGetValue("Features", out var fe)) _features = JsonSerializer.Deserialize<FeatureConfig>(fe.GetRawText()) ?? new();
+            if (doc.TryGetValue("Aptio", out var ap)) _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new();
+            if (doc.TryGetValue("AptioAutoProcess", out var aa))
+            {
+                var aap = JsonSerializer.Deserialize<AptioAutoProcessConfig>(aa.GetRawText());
+                if (aap != null) { _dc = aap.Dispose ?? new(); _dlv = aap.Deliver; _prt = aap.Priority; }
+            }
+            _runDays = WorkTimeChecker.ParseRunDays(_dc.DiscardRunDate);
+            _timeRanges = WorkTimeChecker.ParseTimeRanges(_dc.DiscardTimeRange);
+            _allowErrors = new HashSet<string>(
+                _dc.AllowSrmErrorCode.Split(',', StringSplitOptions.TrimEntries)
+                    .Where(c => !string.IsNullOrEmpty(c)));
+        }
+        catch { }
     }
 
     public SysStatus CurrentState { get => _state; set => _state = value; }
@@ -65,24 +81,28 @@ public class DisposeSampleWorker : BackgroundService
 
         while (!ct.IsCancellationRequested)
         {
+            RefreshConfig();
             try
             {
+                try { await HandleCommandsAsync(ct); } catch { }
+
                 if (!await EnsureConnectedAsync(ct))
-                { await Task.Delay(5000, ct); continue; }
+                { await _health.RecordHealthAsync("DisposeSample", "degraded", "Aptio not connected"); await Task.Delay(5000, ct); continue; }
 
                 if (!await _db.PingAsync())
-                { await Task.Delay(_dc.LoopIntervalSeconds * 1000, ct); continue; }
+                { await _health.RecordHealthAsync("DisposeSample", "degraded", "Database unavailable"); await Task.Delay(_dc.LoopIntervalSeconds * 1000, ct); continue; }
 
                 await TickAsync(ct);
+                await _health.RecordHealthAsync("DisposeSample", "healthy");
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex) { _logger.LogError(ex, "Worker error"); }
+            catch (Exception ex) { _logger.LogError(ex, "Worker error"); try { await _health.RecordHealthAsync("DisposeSample", "degraded", ex.Message); await _health.RecordErrorAsync("DisposeSample", "ERROR", ex.Message); } catch { } }
 
             await Task.Delay(_dc.LoopIntervalSeconds * 1000, ct);
         }
 
-        await _db.DeleteUnsendAsync();
-        _logger.LogInformation("DisposeSample stopped");
+        try { await _db.DeleteUnsendAsync(); _logger.LogInformation("DisposeSample stopped"); }
+        catch { _logger.LogWarning("DisposeSample cleanup skipped"); }
     }
 
     private async Task<bool> EnsureConnectedAsync(CancellationToken ct)
@@ -131,18 +151,51 @@ public class DisposeSampleWorker : BackgroundService
 
     public async Task HandleCommandsAsync(CancellationToken ct = default)
     {
-        if (_dlv is { Enabled: true })
-            await ProcessDeliverAsync(ct);
+        if (_features.Delivery && _dlv != null)
+        {
+            try { await ProcessDeliverAsync(ct); try { await _health.RecordHealthAsync("Delivery", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("Delivery error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("Delivery", "degraded", ex.Message); await _health.RecordErrorAsync("Delivery", "ERROR", ex.Message); } catch { } }
+        }
+        else try { await _health.RecordHealthAsync("Delivery", "stopped"); } catch { }
 
-        if (_prt is { Enabled: true })
-            await ProcessPriorityAsync(ct);
+        if (_features.Priority && _prt != null)
+        {
+            try { await ProcessPriorityAsync(ct); try { await _health.RecordHealthAsync("Priority", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("Priority error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("Priority", "degraded", ex.Message); await _health.RecordErrorAsync("Priority", "ERROR", ex.Message); } catch { } }
+        }
+        else try { await _health.RecordHealthAsync("Priority", "stopped"); } catch { }
 
-        if (_dc.EnableTestNameDispose && !string.IsNullOrEmpty(_dc.DisposeTestName))
-            await ProcessTestNameDisposeAsync(ct);
+        if (_features.TestNameDispose && _dc.EnableTestNameDispose && !string.IsNullOrEmpty(_dc.DisposeTestName))
+        {
+            try { await ProcessTestNameDisposeAsync(ct); try { await _health.RecordHealthAsync("TestNameDispose", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("TestNameDispose error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("TestNameDispose", "degraded", ex.Message); await _health.RecordErrorAsync("TestNameDispose", "ERROR", ex.Message); } catch { } }
+        }
+        else try { await _health.RecordHealthAsync("TestNameDispose", "stopped"); } catch { }
 
-        // File-based delivery list processing
-        if (_dlv is { Enabled: true } && !string.IsNullOrEmpty(_dlv.DeliveryListFilePath))
-            await ProcessDeliveryListFileAsync(ct);
+        if (_features.Delivery && _dlv != null && !string.IsNullOrEmpty(_dlv.DeliveryListFilePath))
+        {
+            try { await ProcessDeliveryListFileAsync(ct); try { await _health.RecordHealthAsync("DeliveryFile", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("DeliveryFile error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("DeliveryFile", "degraded", ex.Message); await _health.RecordErrorAsync("DeliveryFile", "ERROR", ex.Message); } catch { } }
+        }
+        else try { await _health.RecordHealthAsync("DeliveryFile", "stopped"); } catch { }
+
+        if (_prt is { Enabled: true } && _features.Priority)
+        {
+            try { await ProcessPriorityAsync(ct); try { await _health.RecordHealthAsync("Priority", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("Priority error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("Priority", "degraded", ex.Message); } catch { } }
+        }
+
+        if (_dc.EnableTestNameDispose && !string.IsNullOrEmpty(_dc.DisposeTestName) && _features.TestNameDispose)
+        {
+            try { await ProcessTestNameDisposeAsync(ct); try { await _health.RecordHealthAsync("TestNameDispose", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("TestNameDispose error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("TestNameDispose", "degraded", ex.Message); } catch { } }
+        }
+
+        if (_dlv is { Enabled: true } && !string.IsNullOrEmpty(_dlv.DeliveryListFilePath) && _features.Delivery)
+        {
+            try { await ProcessDeliveryListFileAsync(ct); try { await _health.RecordHealthAsync("DeliveryFile", "healthy"); } catch { } }
+            catch (Exception ex) { _logger.LogWarning("DeliveryFile error: {Msg}", ex.Message); try { await _health.RecordHealthAsync("DeliveryFile", "degraded", ex.Message); } catch { } }
+        }
     }
 
     private async Task ProcessDeliverAsync(CancellationToken ct)

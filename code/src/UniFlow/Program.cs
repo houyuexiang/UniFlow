@@ -37,9 +37,9 @@ builder.Services.Configure<AptioAutoProcessConfig>(builder.Configuration.GetSect
 // Common
 builder.Services.AddSingleton<IAptioSocketClient, AptioSocketClient>();
 builder.Services.AddSingleton<SrmStatusDecoder>();
-builder.Services.AddSingleton(aptio); // for direct injection
+builder.Services.AddSingleton(aptio);
 
-// DisposeSample + SrmExport (both under AptioAutoProcess)
+// DisposeSample + SrmExport
 var dbCfg = aptio.Database ?? new();
 var autoCfg = builder.Configuration.GetSection("AptioAutoProcess").Get<AptioAutoProcessConfig>() ?? new();
 var aptioFactory = new MySqlConnectionFactory(dbCfg);
@@ -64,14 +64,12 @@ if (features.AptioAutoProcess)
     builder.Services.AddHostedService<SrmExportWorker>();
 }
 
-// WorkListCleaner (multi-instance)
+// WorkListCleaner
 if (features.ImmuliteWorkOrderClean)
 {
     builder.Services.AddSingleton<CentralinkService>();
-
     var cleanerConfigs = builder.Configuration.GetSection("WorkListCleaners")
         .Get<List<UniFlow.WorkListCleaner.Models.CleanerConfig>>() ?? new();
-
     foreach (var cfg in cleanerConfigs.Where(c => c.Enabled))
     {
         var config = cfg;
@@ -85,8 +83,7 @@ if (features.ImmuliteWorkOrderClean)
                 return new UniFlow.WorkListCleaner.Services.ImmuliteCleaner(
                     sp.GetRequiredService<ILogger<UniFlow.WorkListCleaner.Services.ImmuliteCleaner>>(),
                     sp.GetRequiredService<UniFlow.WorkListCleaner.Services.CentralinkService>(),
-                    config,
-                    agent: agent);
+                    config, agent: agent);
             });
         }
         else
@@ -101,7 +98,6 @@ if (features.ImmuliteWorkOrderClean)
         }
         builder.Services.AddSingleton(config);
     }
-
     builder.Services.AddHostedService<WorkListCleanerWorker>();
 }
 
@@ -130,12 +126,10 @@ if (webCfg.Enabled)
     builder.Services.AddHostedService<HealthCheckWorker>();
 }
 
-// ===== Build =====
 builder.WebHost.UseUrls($"http://{webCfg.BindIp}:{webCfg.Port}");
 
 var app = builder.Build();
 
-// ===== API Endpoints =====
 if (webCfg.Enabled)
 {
     app.UseStaticFiles();

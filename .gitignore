@@ -23,6 +23,9 @@ logs/
 # Release artifacts
 release/publish/
 
+# 测试运行目录
+run-test/
+
 # Build outputs
 code/src/**/bin/
 code/src/**/obj/

@@ -176,13 +176,29 @@ public class HealthStore : IDisposable
 
     public async Task CleanupOldAsync()
     {
+        // 按时间清理（保留 _retentionDays 天）
         var cutoff = DateTime.Now.AddDays(-_retentionDays).ToString("yyyy-MM-dd HH:mm:ss");
         var cmd = _conn.CreateCommand();
         cmd.CommandText = "DELETE FROM health_records WHERE timestamp < @cut";
         cmd.Parameters.AddWithValue("@cut", cutoff);
         await cmd.ExecuteNonQueryAsync();
-        cmd.CommandText = "DELETE FROM error_records WHERE timestamp < @cut";
+
+        // 按数量封顶：每个模块最多保留 5000 条最新记录
+        cmd.CommandText = """
+            DELETE FROM health_records WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (PARTITION BY module ORDER BY id DESC) rn
+                    FROM health_records
+                ) t WHERE rn > 5000
+            )
+            """;
         await cmd.ExecuteNonQueryAsync();
+
+        // 错误记录保留 7 天即可
+        cmd.CommandText = "DELETE FROM error_records WHERE timestamp < @cut7";
+        cmd.Parameters.AddWithValue("@cut7", DateTime.Now.AddDays(-7).ToString("yyyy-MM-dd HH:mm:ss"));
+        await cmd.ExecuteNonQueryAsync();
+        cmd.Parameters.Clear();
     }
 
     public void Dispose() => _conn.Dispose();

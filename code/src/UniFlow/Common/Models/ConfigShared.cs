@@ -5,6 +5,9 @@ public class FeatureConfig
     public bool AptioAutoProcess { get; set; } = true;
     public bool ImmuliteWorkOrderClean { get; set; }
     public bool DmsAutoOrder { get; set; }
+    public bool Delivery { get; set; }
+    public bool Priority { get; set; }
+    public bool TestNameDispose { get; set; }
 }
 
 // ===== Infrastructure Configs =====

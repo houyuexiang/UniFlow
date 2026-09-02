@@ -1,6 +1,7 @@
-using Microsoft.Extensions.Options;
+using System.Text.Json;
 using UniFlow.Common.Models;
 using UniFlow.SrmExport.Models;
+using UniFlow.WebAdmin.Services;
 
 namespace UniFlow.SrmExport.Workers;
 
@@ -9,22 +10,39 @@ public class SrmExportWorker : BackgroundService
     private readonly ILogger<SrmExportWorker> _logger;
     private readonly Services.IExportDatabaseService _db;
     private readonly Services.IExportFileService _export;
-    private readonly AptioConfig _aptio;
-    private readonly AptioAutoExportConfig _ec;
+    private readonly HealthStore _health;
+    private AptioConfig _aptio = default!;
+    private AptioAutoExportConfig _ec = new();
     private bool _exportedToday;
 
     public SrmExportWorker(
         ILogger<SrmExportWorker> logger,
         Services.IExportDatabaseService db,
         Services.IExportFileService export,
-        IOptions<AptioConfig> aptioConfig,
-        IOptions<AptioAutoProcessConfig> autoProcessConfig)
+        HealthStore health)
     {
         _logger = logger;
         _db = db;
         _export = export;
-        _aptio = aptioConfig.Value;
-        _ec = autoProcessConfig.Value.Export ?? new();
+        _health = health;
+        RefreshConfig();
+    }
+
+    private void RefreshConfig()
+    {
+        try
+        {
+            var json = File.ReadAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json"));
+            var doc = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
+            if (doc == null) return;
+            if (doc.TryGetValue("Aptio", out var ap)) _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new();
+            if (doc.TryGetValue("AptioAutoProcess", out var aa))
+            {
+                var aap = JsonSerializer.Deserialize<AptioAutoProcessConfig>(aa.GetRawText());
+                if (aap != null) _ec = aap.Export ?? new();
+            }
+        }
+        catch { }
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -34,6 +52,7 @@ public class SrmExportWorker : BackgroundService
 
         while (!ct.IsCancellationRequested)
         {
+            RefreshConfig();
             try
             {
                 var now = DateTime.Now;
@@ -49,9 +68,10 @@ public class SrmExportWorker : BackgroundService
                     _exportedToday = false;
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex) { _logger.LogError(ex, "Export error"); }
+            catch (Exception ex) { _logger.LogError(ex, "Export error"); try { await _health.RecordHealthAsync("SrmExport", "degraded", ex.Message); await _health.RecordErrorAsync("SrmExport", "ERROR", ex.Message); } catch { } }
 
             await Task.Delay(TimeSpan.FromSeconds(_ec.LoopIntervalSeconds), ct);
+            try { await _health.RecordHealthAsync("SrmExport", "healthy"); } catch { }
         }
     }
 

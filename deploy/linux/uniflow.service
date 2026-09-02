@@ -4,9 +4,9 @@ After=network.target mysql.service mariadb.service
 Wants=mysql.service
 
 [Service]
-Type=notify
-ExecStart=/usr/share/uniflow/UniFlow/UniFlow
-WorkingDirectory=/usr/share/uniflow/UniFlow
+Type=simple
+ExecStart=/usr/share/uniflow/UniFlow
+WorkingDirectory=/usr/share/uniflow
 Restart=on-failure
 RestartSec=10
 User=uniflow
@@ -19,8 +19,7 @@ CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
+ProtectSystem=false
 
 [Install]
 WantedBy=multi-user.target
