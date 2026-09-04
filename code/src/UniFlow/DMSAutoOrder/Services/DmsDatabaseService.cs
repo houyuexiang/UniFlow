@@ -70,16 +70,16 @@ public class DmsDatabaseService
         return rows.ToList();
     }
 
-    public async Task ExecuteSqlAsync(string sql)
+    public async Task<int> ExecuteSqlAsync(string sql)
     {
         using var conn = NewConnection();
-        await conn.ExecuteAsync(sql);
+        return await conn.ExecuteAsync(sql);
     }
 
-    public async Task ExecuteSqlAsync(string sql, object parameters)
+    public async Task<int> ExecuteSqlAsync(string sql, object parameters)
     {
         using var conn = NewConnection();
-        await conn.ExecuteAsync(sql, parameters);
+        return await conn.ExecuteAsync(sql, parameters);
     }
 
     public async Task<List<string>> GetTableColumnsAsync(string columnName)
@@ -99,7 +99,16 @@ public class DmsDatabaseService
         foreach (var template in deleteTableSqlTemplates)
         {
             var sql = string.Format(template, sid, oid);
-            await conn.ExecuteAsync(sql);
+            try
+            {
+                await conn.ExecuteAsync(sql);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Delete sample failed: Sid={Sid}, Oid={Oid}, SQL={Sql}", sid, oid, sql);
+            }
         }
+        _logger.LogInformation("Deleted sample records: Sid={Sid}, Oid={Oid}, Tables={Count}",
+            sid, oid, deleteTableSqlTemplates.Count);
     }
 }

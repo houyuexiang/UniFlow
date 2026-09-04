@@ -16,7 +16,7 @@ public class ExportFileService : IExportFileService
 
     public async Task<string> ExportAsync(List<Models.DisposedSample> samples)
     {
-        var dir = Path.Combine(_baseDir, "DisposeFile");
+        var dir = _baseDir;
         Directory.CreateDirectory(dir);
         var ts = DateTime.Now.ToString("yyyyMMddHHmmss");
         var path = Path.Combine(dir, $"Dispose_{ts}_{samples.Count}.txt");
@@ -38,7 +38,7 @@ public class ExportFileService : IExportFileService
 
     public void CleanOld(int retentionDays)
     {
-        var dir = Path.Combine(_baseDir, "DisposeFile");
+        var dir = _baseDir;
         if (!Directory.Exists(dir)) return;
         var cutoff = DateTime.Now.AddDays(-retentionDays);
         foreach (var f in Directory.GetFiles(dir, "Dispose_*.txt"))

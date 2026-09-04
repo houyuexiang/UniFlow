@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Hosting;
 using UniFlow.Common.Models;
 using UniFlow.Common.Services;
 using UniFlow.Common.Services.Logging;
@@ -13,6 +14,11 @@ using UniFlow.WebAdmin;
 using UniFlow.WebAdmin.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseWindowsService(options =>
+{
+    options.ServiceName = "UniFlow";
+});
 
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 
@@ -54,7 +60,10 @@ builder.Services.AddSingleton<IExportFileService>(sp =>
 {
     var log = sp.GetRequiredService<ILogger<ExportFileService>>();
     var outputPath = autoCfg.Export?.OutputPath;
-    var baseDir = string.IsNullOrEmpty(outputPath) ? null : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, outputPath);
+    // outputPath 即最终输出目录（相对安装目录），如 "DisposeFile"
+    var baseDir = string.IsNullOrEmpty(outputPath)
+        ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DisposeFile")
+        : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, outputPath);
     return new ExportFileService(log, baseDir);
 });
 

@@ -79,14 +79,20 @@ public static class ApiEndpoints
             if (!Directory.Exists(logDir)) return Results.Ok(new List<object>());
 
             var cutoff = DateTime.Now.AddDays(-(days ?? 7));
-            var files = Directory.GetFiles(logDir, "*.log")
+            var files = Directory.GetFiles(logDir, "*.log", SearchOption.AllDirectories)
                 .Select(f => new FileInfo(f))
                 .Where(f => f.LastWriteTime >= cutoff)
-                .Select(f => new
+                .Select(f =>
                 {
-                    name = f.Name,
-                    size = f.Length,
-                    lastModified = f.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+                    var rel = Path.GetRelativePath(logDir, f.FullName).Replace('\\', '/');
+                    return new
+                    {
+                        path = rel,
+                        name = f.Name,
+                        date = f.Directory?.Name ?? "",
+                        size = f.Length,
+                        lastModified = f.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+                    };
                 })
                 .OrderByDescending(f => f.lastModified)
                 .ToList();
@@ -95,14 +101,46 @@ public static class ApiEndpoints
 
         api.MapGet("/logs/view", (string file, int? tail) =>
         {
-            var logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
-            var path = Path.Combine(logDir, Path.GetFileName(file));
-            if (!File.Exists(path)) return Results.NotFound();
+            if (string.IsNullOrWhiteSpace(file))
+                return Results.Problem("Invalid log path", statusCode: 400);
 
-            var lines = File.ReadAllLines(path).ToList();
-            if (tail.HasValue && tail.Value > 0)
-                lines = lines.TakeLast(tail.Value).ToList();
-            return Results.Ok(new { lines, total = lines.Count });
+            var logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+            string full;
+            try
+            {
+                // 防路径穿越: 必须解析到 logs 目录内
+                full = Path.GetFullPath(Path.Combine(logDir, file));
+            }
+            catch
+            {
+                return Results.Problem("Invalid log path", statusCode: 400);
+            }
+
+            if (!full.StartsWith(Path.GetFullPath(logDir) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                && !full.Equals(Path.GetFullPath(logDir), StringComparison.OrdinalIgnoreCase))
+                return Results.Problem("Invalid log path", statusCode: 400);
+
+            if (!File.Exists(full)) return Results.NotFound();
+
+            try
+            {
+                // 使用 FileShare.ReadWrite 允许读取正在被日志 provider 写入的文件
+                var lines = new List<string>();
+                using (var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var sr = new StreamReader(fs, System.Text.Encoding.UTF8))
+                {
+                    string? line;
+                    while ((line = sr.ReadLine()) != null)
+                        lines.Add(line);
+                }
+                if (tail.HasValue && tail.Value > 0)
+                    lines = lines.TakeLast(tail.Value).ToList();
+                return Results.Ok(new { lines, total = lines.Count });
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem($"Read log failed: {ex.Message}", statusCode: 500);
+            }
         });
     }
 

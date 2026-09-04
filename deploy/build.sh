@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SDK_IMAGE="mcr.microsoft.com/dotnet/sdk:10.0-alpine"
 CMD="${1:-build}"
 
-VERSION="1.0.2"
+VERSION="1.0.5"
 DATE=$(date +%Y%m%d)
 
 case "$CMD" in

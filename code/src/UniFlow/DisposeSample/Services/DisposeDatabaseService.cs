@@ -81,14 +81,24 @@ public class DisposeDatabaseService : IDisposeDatabaseService
             if (existing != null) { exist++; continue; }
 
             var rack = GetLocationRackNo(s.Location);
-            await conn.ExecuteAsync("""
+            var sql = """
                 INSERT INTO sam_dispose_status
                     (barcode,patient,stype,location,update_time,res_1,res_2,rack,send,disposed,checkcount)
                 VALUES (@Barcode,@Patient,@Stype,@Location,@UpdateTime,@Res1,@Res2,@Rack,0,0,0)
-                """, new { s.Barcode, s.Patient, s.Stype, s.Location, s.UpdateTime, s.Res1, s.Res2, Rack = rack });
-            inserted++;
+                """;
+            try
+            {
+                await conn.ExecuteAsync(sql, new { s.Barcode, s.Patient, s.Stype, s.Location, s.UpdateTime, s.Res1, s.Res2, Rack = rack });
+                inserted++;
+                _logger.LogInformation("Inserted dispose record: Barcode={Barcode}, Location={Location}, Rack={Rack}",
+                    s.Barcode, s.Location, rack);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Insert dispose record failed: Barcode={Barcode}, SQL={Sql}", s.Barcode, sql);
+            }
         }
-        _logger.LogInformation("Inserted={Inserted} Exists={Exist}", inserted, exist);
+        _logger.LogInformation("Insert summary: Inserted={Inserted} Exists={Exist}", inserted, exist);
         return inserted;
     }
 
@@ -112,9 +122,16 @@ public class DisposeDatabaseService : IDisposeDatabaseService
             "checkcount" => "checkcount=checkcount+1, check_time=@Now",
             _ => throw new ArgumentException($"Unknown field: {field}")
         };
-        await conn.ExecuteAsync($"UPDATE sam_dispose_status SET {setClause} WHERE barcode=@B",
-            new { B = barcode, Now = now });
-        _logger.LogInformation("Update {Barcode} field={Field}", barcode, field);
+        var sql = $"UPDATE sam_dispose_status SET {setClause} WHERE barcode=@B";
+        try
+        {
+            await conn.ExecuteAsync(sql, new { B = barcode, Now = now });
+            _logger.LogInformation("Update dispose record: Barcode={Barcode}, Field={Field}", barcode, field);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Update dispose record failed: Barcode={Barcode}, Field={Field}, SQL={Sql}", barcode, field, sql);
+        }
     }
 
     public async Task<bool> CheckDisposedAsync(string barcode, string nodeId)
@@ -140,17 +157,38 @@ public class DisposeDatabaseService : IDisposeDatabaseService
     {
         using var conn = NewConnection();
         await conn.OpenAsync();
-        await conn.ExecuteAsync("DELETE FROM sam_dispose_status WHERE send=0");
-        _logger.LogInformation("Deleted unsend records");
+        var sql = "DELETE FROM sam_dispose_status WHERE send=0";
+        try
+        {
+            var barcodes = (await conn.QueryAsync<string>("SELECT barcode FROM sam_dispose_status WHERE send=0")).AsList();
+            var affected = await conn.ExecuteAsync(sql);
+            _logger.LogInformation("Deleted unsend records: Count={Count}, Barcodes=[{Barcodes}]",
+                affected, string.Join(",", barcodes));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Delete unsend records failed: SQL={Sql}", sql);
+        }
     }
 
     public async Task DeleteHistoryAsync()
     {
         using var conn = NewConnection();
         await conn.OpenAsync();
-        var n = await conn.ExecuteAsync(
-            "DELETE FROM sam_dispose_status WHERE send=1 AND TIMESTAMPDIFF(DAY,send_time,NOW())>10");
-        if (n > 0) _logger.LogInformation("Deleted {Count} history records", n);
+        var sql = "DELETE FROM sam_dispose_status WHERE send=1 AND TIMESTAMPDIFF(DAY,send_time,NOW())>10";
+        try
+        {
+            var barcodes = (await conn.QueryAsync<string>(
+                "SELECT barcode FROM sam_dispose_status WHERE send=1 AND TIMESTAMPDIFF(DAY,send_time,NOW())>10")).AsList();
+            var affected = await conn.ExecuteAsync(sql);
+            if (affected > 0)
+                _logger.LogInformation("Deleted history records: Count={Count}, Barcodes=[{Barcodes}]",
+                    affected, string.Join(",", barcodes));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Delete history records failed: SQL={Sql}", sql);
+        }
     }
 
     public async Task<List<SampleRecord>> GetDeliverRecordsAsync(string deliverTestName, int maxCount)
@@ -190,9 +228,16 @@ public class DisposeDatabaseService : IDisposeDatabaseService
     {
         using var conn = NewConnection();
         await conn.OpenAsync();
-        await conn.ExecuteAsync(
-            "UPDATE sam_dispose_status SET disposed=1 WHERE barcode=@B",
-            new { B = barcode });
+        var sql = "UPDATE sam_dispose_status SET disposed=1 WHERE barcode=@B";
+        try
+        {
+            await conn.ExecuteAsync(sql, new { B = barcode });
+            _logger.LogInformation("Priority done set: Barcode={Barcode}", barcode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Set priority done failed: Barcode={Barcode}, SQL={Sql}", barcode, sql);
+        }
     }
 
     private static string GetLocationRackNo(string? loc)

@@ -58,6 +58,15 @@ public class SrmExportWorker : BackgroundService
                 var now = DateTime.Now;
                 var target = ParseTimeOnly(_ec.ExportTime);
 
+                // 每次循环检查数据库连通性，反映真实健康状态
+                if (!await _db.PingAsync())
+                {
+                    _logger.LogWarning("SrmExport DB unavailable");
+                    try { await _health.RecordHealthAsync("SrmExport", "degraded", "Database unavailable"); } catch { }
+                    await Task.Delay(TimeSpan.FromSeconds(_ec.LoopIntervalSeconds), ct);
+                    continue;
+                }
+
                 if (!_exportedToday && now.Hour == target.Hour && now.Minute == target.Minute)
                 {
                     await RunExportAsync(ct);
@@ -66,12 +75,13 @@ public class SrmExportWorker : BackgroundService
 
                 if (now.Hour == 0 && now.Minute == 0)
                     _exportedToday = false;
+
+                try { await _health.RecordHealthAsync("SrmExport", "healthy"); } catch { }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _logger.LogError(ex, "Export error"); try { await _health.RecordHealthAsync("SrmExport", "degraded", ex.Message); await _health.RecordErrorAsync("SrmExport", "ERROR", ex.Message); } catch { } }
 
             await Task.Delay(TimeSpan.FromSeconds(_ec.LoopIntervalSeconds), ct);
-            try { await _health.RecordHealthAsync("SrmExport", "healthy"); } catch { }
         }
     }
 

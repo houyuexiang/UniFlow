@@ -41,8 +41,8 @@ public class ExportDatabaseService : IExportDatabaseService
         await conn.OpenAsync();
         var location = $"&3-{nodeId}-%";
         return (await conn.QueryAsync<DisposedSample>("""
-            SELECT sample_id COLLATE latin1_swedish_ci AS Barcode,
-                   t_location COLLATE latin1_swedish_ci AS Location,
+            SELECT sample_id AS Barcode,
+                   t_location AS Location,
                    update_time AS UpdateTime
             FROM t_sample
             WHERE update_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY),'%Y%m%d')

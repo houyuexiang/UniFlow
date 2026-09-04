@@ -153,8 +153,10 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
 
     private string BuildPath(string template, string date, int index)
     {
-        var name = $"{string.Format(template, index)}_{date}.log";
-        return Path.Combine(_baseDir, name);
+        var dayDir = Path.Combine(_baseDir, date);
+        Directory.CreateDirectory(dayDir);
+        var name = $"{string.Format(template, index)}.log";
+        return Path.Combine(dayDir, name);
     }
 
     private void OpenFile(LogFileState state, string path)
@@ -174,12 +176,21 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
         {
             if (!Directory.Exists(_baseDir)) return;
             var cutoff = DateTime.Now.AddDays(-_retentionDays);
-            foreach (var f in Directory.GetFiles(_baseDir, "*.log"))
+            foreach (var dir in Directory.GetDirectories(_baseDir))
             {
-                var fi = new FileInfo(f);
-                if (fi.LastWriteTime < cutoff)
+                var di = new DirectoryInfo(dir);
+                if (di.LastWriteTime < cutoff)
                 {
-                    try { fi.Delete(); } catch { }
+                    try { di.Delete(true); } catch { }
+                    continue;
+                }
+                foreach (var f in Directory.GetFiles(dir, "*.log"))
+                {
+                    var fi = new FileInfo(f);
+                    if (fi.LastWriteTime < cutoff)
+                    {
+                        try { fi.Delete(); } catch { }
+                    }
                 }
             }
         }

@@ -250,21 +250,34 @@ async function loadLogFiles() {
   const container = document.getElementById('logFileList');
   if (data.length === 0) { container.innerHTML = '<div class="loading">暂无日志文件</div>'; return; }
   container.innerHTML = '';
+  // 按日期目录分组
+  const groups = {};
   data.forEach(f => {
-    const item = document.createElement('div');
-    item.className = 'log-file-item' + (f.name.startsWith('UniFlow_Error') ? ' error-file' : '');
-    const size = f.size > 1024 * 1024 ? (f.size / 1024 / 1024).toFixed(1) + 'MB' : (f.size / 1024).toFixed(1) + 'KB';
-    item.innerHTML = `<div><div class="name">${f.name}</div><div class="meta">${f.lastModified} · ${size}</div></div><span>查看</span>`;
-    item.onclick = () => viewLogFile(f.name);
-    container.appendChild(item);
+    const d = f.date || '其他';
+    if (!groups[d]) groups[d] = [];
+    groups[d].push(f);
+  });
+  Object.keys(groups).sort().reverse().forEach(d => {
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'grid-column:1 / -1;font-size:12px;color:var(--text2);font-weight:600;padding:8px 0 2px;';
+    hdr.textContent = d;
+    container.appendChild(hdr);
+    groups[d].forEach(f => {
+      const item = document.createElement('div');
+      item.className = 'log-file-item' + (f.name.startsWith('UniFlow_Error') ? ' error-file' : '');
+      const size = f.size > 1024 * 1024 ? (f.size / 1024 / 1024).toFixed(1) + 'MB' : (f.size / 1024).toFixed(1) + 'KB';
+      item.innerHTML = `<div><div class="name">${f.name}</div><div class="meta">${f.lastModified} · ${size}</div></div><span>查看</span>`;
+      item.onclick = () => viewLogFile(f.path);
+      container.appendChild(item);
+    });
   });
 }
 
-async function viewLogFile(name) {
-  const data = await api(`/logs/view?file=${encodeURIComponent(name)}&tail=200`);
+async function viewLogFile(path) {
+  const data = await api(`/logs/view?file=${encodeURIComponent(path)}&tail=200`);
   if (!data) return;
   document.getElementById('logViewer').style.display = 'block';
-  document.getElementById('logViewerTitle').textContent = name + ' (最近200行)';
+  document.getElementById('logViewerTitle').textContent = path + ' (最近200行)';
   document.getElementById('logContent').textContent = data.lines.join('\n');
 }
 
