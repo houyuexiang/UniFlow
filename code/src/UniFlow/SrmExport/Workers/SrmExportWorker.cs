@@ -35,14 +35,21 @@ public class SrmExportWorker : BackgroundService
             var json = File.ReadAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json"));
             var doc = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
             if (doc == null) return;
-            if (doc.TryGetValue("Aptio", out var ap)) _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new();
+            if (doc.TryGetValue("Aptio", out var ap))
+            {
+                try { _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new(); }
+                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, using defaults: {Raw}", ap.GetRawText()); _aptio = new(); }
+            }
             if (doc.TryGetValue("AptioAutoProcess", out var aa))
             {
                 var aap = JsonSerializer.Deserialize<AptioAutoProcessConfig>(aa.GetRawText());
                 if (aap != null) _ec = aap.Export ?? new();
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SrmExport config reload failed, keeping previous values");
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)

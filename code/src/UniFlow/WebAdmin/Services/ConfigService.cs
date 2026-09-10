@@ -38,6 +38,9 @@ public class ConfigService
             try
             {
                 var config = ReadAll();
+                // SrmNodeIds 期望为字符串数组，统一格式处理
+                if (jsonPath.EndsWith("SrmNodeIds", StringComparison.OrdinalIgnoreCase))
+                    value = NormalizeSrmNodeIds(value);
                 SetNested(config, jsonPath.Split(':'), value);
                 var options = new JsonSerializerOptions { WriteIndented = true };
                 File.WriteAllText(_filePath, JsonSerializer.Serialize(config, options));
@@ -50,6 +53,20 @@ public class ConfigService
                 return false;
             }
         }
+    }
+
+    private static object NormalizeSrmNodeIds(object value)
+    {
+        // 数字 -> ["13"]；字符串 -> ["13"]；数组 -> 保持字符串数组
+        if (value is JsonElement je)
+        {
+            if (je.ValueKind == JsonValueKind.Array)
+                return je.EnumerateArray().Select(e => e.ValueKind == JsonValueKind.String ? e.GetString() : e.ToString()).Cast<string>().ToList();
+            return new List<string> { je.ValueKind == JsonValueKind.String ? je.GetString()! : je.ToString() };
+        }
+        if (value is System.Collections.IEnumerable enumerable and not string)
+            return enumerable.Cast<object?>().Select(v => v?.ToString() ?? "").ToList();
+        return new List<string> { value?.ToString() ?? "" };
     }
 
     private static void SetNested(Dictionary<string, object?> dict, string[] parts, object value)

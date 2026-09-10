@@ -55,7 +55,11 @@ public class DisposeSampleWorker : BackgroundService
             var doc = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
             if (doc == null) return;
             if (doc.TryGetValue("Features", out var fe)) _features = JsonSerializer.Deserialize<FeatureConfig>(fe.GetRawText()) ?? new();
-            if (doc.TryGetValue("Aptio", out var ap)) _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new();
+            if (doc.TryGetValue("Aptio", out var ap))
+            {
+                try { _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new(); }
+                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, using defaults: {Raw}", ap.GetRawText()); _aptio = new(); }
+            }
             if (doc.TryGetValue("AptioAutoProcess", out var aa))
             {
                 var aap = JsonSerializer.Deserialize<AptioAutoProcessConfig>(aa.GetRawText());
@@ -67,7 +71,10 @@ public class DisposeSampleWorker : BackgroundService
                 _dc.AllowSrmErrorCode.Split(',', StringSplitOptions.TrimEntries)
                     .Where(c => !string.IsNullOrEmpty(c)));
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "DisposeSample config reload failed, keeping previous values");
+        }
     }
 
     public SysStatus CurrentState { get => _state; set => _state = value; }
