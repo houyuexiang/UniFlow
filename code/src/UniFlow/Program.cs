@@ -60,10 +60,12 @@ builder.Services.AddSingleton<IExportFileService>(sp =>
 {
     var log = sp.GetRequiredService<ILogger<ExportFileService>>();
     var outputPath = autoCfg.Export?.OutputPath;
-    // outputPath 即最终输出目录（相对安装目录），如 "DisposeFile"
+    // outputPath 支持相对路径（相对安装目录，如 "DisposeFile"）和绝对路径（如 /data/exports 或 D:\exports）
     var baseDir = string.IsNullOrEmpty(outputPath)
         ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DisposeFile")
-        : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, outputPath);
+        : Path.IsPathRooted(outputPath)
+            ? outputPath
+            : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, outputPath);
     return new ExportFileService(log, baseDir);
 });
 
