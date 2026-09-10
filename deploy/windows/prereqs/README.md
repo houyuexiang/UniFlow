@@ -1,29 +1,29 @@
-# UniFlow Windows 前置依赖
+# UniFlow Windows Prerequisites
 
-## WorkListCleaner 模块
+## WorkListCleaner Module
 
-如果使用 `ImmuliteWorkOrderClean` 功能（MS Access 数据库），需要安装：
+If you use the `ImmuliteWorkOrderClean` feature (MS Access database), you need to install:
 
 **Microsoft Access Database Engine 2016 Redistributable**
 
-### 自动安装
+### Automatic Installation
 
-以管理员身份运行：
+Run as administrator:
 
 ```powershell
 .\install-prereqs.ps1
 ```
 
-### 手动安装
+### Manual Installation
 
-1. 打开下载页面：https://www.microsoft.com/en-us/download/details.aspx?id=54920
-2. 点击 **Download** 按钮
-3. 勾选 `AccessDatabaseEngine_X64.exe`（64位）或 `AccessDatabaseEngine.exe`（32位）
-4. 点击 **Next** 下载
-5. 双击安装包安装
+1. Open the download page: https://www.microsoft.com/en-us/download/details.aspx?id=54920
+2. Click the **Download** button
+3. Select `AccessDatabaseEngine_X64.exe` (64-bit) or `AccessDatabaseEngine.exe` (32-bit)
+4. Click **Next** to download
+5. Double-click the installer to install
 
-### 注意事项
+### Notes
 
-- 64 位系统请安装 64 位版本，否则 UniFlow 的 OleDb 连接会失败
-- 如果已安装 Office 的 32 位版本，只能安装 32 位的 Access Database Engine
-- 安装后无需重启即可使用
+- On 64-bit systems, install the 64-bit version, otherwise UniFlow's OleDb connection will fail
+- If 32-bit Office is installed, only the 32-bit Access Database Engine can be installed
+- No reboot required after installation
