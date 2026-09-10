@@ -2,12 +2,38 @@ namespace UniFlow.Common.Models;
 
 public class FeatureConfig
 {
+    public AptioFeatures Aptio { get; set; } = new();
+    public ImmuliteFeatures Immulite { get; set; } = new();
+    public DmsFeatures Dms { get; set; } = new();
+
+    // 兼容旧配置：从平铺结构迁移
     public bool AptioAutoProcess { get; set; } = true;
     public bool ImmuliteWorkOrderClean { get; set; }
     public bool DmsAutoOrder { get; set; }
     public bool Delivery { get; set; }
     public bool Priority { get; set; }
     public bool TestNameDispose { get; set; }
+}
+
+public class AptioFeatures
+{
+    public bool DisposeSample { get; set; } = true;
+    public bool SrmExport { get; set; } = true;
+    public bool Delivery { get; set; }
+    public bool Priority { get; set; }
+    public bool TestNameDispose { get; set; }
+}
+
+public class ImmuliteFeatures
+{
+    public bool WorkListCleaner { get; set; }
+}
+
+public class DmsFeatures
+{
+    public bool PitStopMonitor { get; set; }
+    public bool StatusCorrection { get; set; }
+    public bool SampleCleanup { get; set; }
 }
 
 // ===== Infrastructure Configs =====

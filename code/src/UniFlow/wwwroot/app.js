@@ -23,12 +23,31 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 // ===== Dashboard =====
 const FEATURE_MAP = {
-  System: null, DisposeSample: 'AptioAutoProcess', SrmExport: 'AptioAutoProcess',
-  Delivery: 'Delivery', DeliveryFile: 'Delivery',
-  Priority: 'Priority', TestNameDispose: 'TestNameDispose',
-  DmsAutoOrder: 'DmsAutoOrder', DmsPitStop: 'DmsAutoOrder',
-  DmsStatusCorr: 'DmsAutoOrder', DmsCleanup: 'DmsAutoOrder',
+  System: null,
+  DisposeSample: 'Aptio.DisposeSample',
+  SrmExport: 'Aptio.SrmExport',
+  Delivery: 'Aptio.Delivery',
+  DeliveryFile: 'Aptio.Delivery',
+  Priority: 'Aptio.Priority',
+  TestNameDispose: 'Aptio.TestNameDispose',
+  WorkListCleaner: 'Immulite.WorkListCleaner',
+  DmsAutoOrder: 'DmsAutoOrder',
+  DmsPitStop: 'Dms.PitStopMonitor',
+  DmsStatusCorr: 'Dms.StatusCorrection',
+  DmsCleanup: 'Dms.SampleCleanup',
 };
+
+// 读取分组配置: cfg.Features["Aptio"]["DisposeSample"]
+function getFeatureVal(cfg, path) {
+  if (!cfg || !cfg.Features) return null;
+  const parts = path.split('.');
+  let cur = cfg.Features;
+  for (const p of parts) {
+    if (cur == null || typeof cur !== 'object') return null;
+    cur = cur[p];
+  }
+  return cur;
+}
 
 async function loadHealth() {
   const [data, cfg] = await Promise.all([api('/health'), api('/config')]);
@@ -50,18 +69,20 @@ async function loadHealth() {
   for (const [mod, info] of Object.entries(data.modules)) {
     const card = document.createElement('div');
     card.className = 'card ' + (info.status || 'unknown');
-    let featKey = FEATURE_MAP[mod];
-    if (featKey === undefined && mod !== 'System') featKey = 'ImmuliteWorkOrderClean';
-    let featVal = featKey && cfg && cfg.Features ? cfg.Features[featKey] : null;
+    const featKey = FEATURE_MAP[mod];
+    // WorkListCleaner 各仪器模块名不在 FEATURE_MAP，回退到 Immulite.WorkListCleaner
+    let featPath = featKey;
+    if (featPath === undefined && mod !== 'System') featPath = 'Immulite.WorkListCleaner';
+    let featVal = featPath ? getFeatureVal(cfg, featPath) : null;
     let isOn = featVal === true;
-    let toggleHtml = featKey ? `<span class="toggle-switch${isOn?' on':''}" style="vertical-align:middle;margin-left:4px"></span>` : '';
+    let toggleHtml = featPath ? `<span class="toggle-switch${isOn?' on':''}" style="vertical-align:middle;margin-left:4px"></span>` : '';
     card.innerHTML = `<div class="label">${mod}${toggleHtml}</div>
       <div class="value">${info.status === 'healthy' ? '✓' : info.status === 'degraded' ? '⚠' : '⏻'}</div>
       <div class="meta">${info.timestamp || ''} ${info.message ? '· ' + info.message : ''}</div>`;
-    if (featKey) {
+    if (featPath) {
       card.querySelector('.toggle-switch').onclick = function(e) {
         e.stopPropagation();
-        api('/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:'Features:'+featKey, value:!isOn}) }).then(function(){ loadHealth(); });
+        api('/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:'Features:'+featPath, value:!isOn}) }).then(function(){ loadHealth(); });
       };
     }
     container.appendChild(card);

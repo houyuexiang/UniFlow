@@ -28,16 +28,33 @@
 
 ## Features（功能开关，**热加载**）
 
+按功能归属分组，每个功能独立开关：
+
+### Aptio 组
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `AptioAutoProcess` | bool | `true` | 样本丢弃(DisposeSample) + SRM 导出(SrmExport) |
-| `ImmuliteWorkOrderClean` | bool | `false` | WorkListCleaner 工作清单清理 |
-| `DmsAutoOrder` | bool | `false` | DMS 自动下单 |
-| `Delivery` | bool | `false` | 标本递送功能 |
-| `Priority` | bool | `false` | 优先级控制功能 |
-| `TestNameDispose` | bool | `false` | 按测试名丢弃功能 |
+| `Aptio.DisposeSample` | bool | `true` | 样本丢弃 |
+| `Aptio.SrmExport` | bool | `true` | SRM 数据导出 |
+| `Aptio.Delivery` | bool | `false` | 标本递送 |
+| `Aptio.Priority` | bool | `false` | 优先级控制 |
+| `Aptio.TestNameDispose` | bool | `false` | 按测试名丢弃 |
 
-> Web 仪表盘页提供滑块开关，与这些字段一一对应。
+### Immulite 组
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `Immulite.WorkListCleaner` | bool | `false` | WorkListCleaner 工作列表清理 |
+
+### Dms 组
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `Dms.PitStopMonitor` | bool | `false` | PitStop 监控 |
+| `Dms.StatusCorrection` | bool | `false` | 状态修正 |
+| `Dms.SampleCleanup` | bool | `false` | 样本清理 |
+
+> Web 仪表盘页提供滑块开关，与这些字段一一对应（路径格式 `Features:Aptio.DisposeSample` 等）。
 
 ---
 

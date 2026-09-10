@@ -41,7 +41,9 @@ public class ConfigService
                 // SrmNodeIds 期望为字符串数组，统一格式处理
                 if (jsonPath.EndsWith("SrmNodeIds", StringComparison.OrdinalIgnoreCase))
                     value = NormalizeSrmNodeIds(value);
-                SetNested(config, jsonPath.Split(':'), value);
+                // 路径支持 : 和 . 两种分隔符（如 "Features:Dms.SampleCleanup"）
+                var parts = jsonPath.Split(new[] { ':', '.' }, StringSplitOptions.RemoveEmptyEntries);
+                SetNested(config, parts, value);
                 var options = new JsonSerializerOptions { WriteIndented = true };
                 File.WriteAllText(_filePath, JsonSerializer.Serialize(config, options));
                 _logger.LogInformation("Config updated: {Path} = {Value}", jsonPath, value);

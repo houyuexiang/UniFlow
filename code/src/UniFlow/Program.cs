@@ -69,14 +69,24 @@ builder.Services.AddSingleton<IExportFileService>(sp =>
     return new ExportFileService(log, baseDir);
 });
 
-if (features.AptioAutoProcess)
-{
+// Aptio 组独立功能开关
+if (features.Aptio.DisposeSample || features.AptioAutoProcess)
     builder.Services.AddHostedService<DisposeSampleWorker>();
-    builder.Services.AddHostedService<SrmExportWorker>();
-}
 
-// WorkListCleaner
-if (features.ImmuliteWorkOrderClean)
+if (features.Aptio.SrmExport || features.AptioAutoProcess)
+    builder.Services.AddHostedService<SrmExportWorker>();
+
+if (features.Aptio.Delivery || features.Delivery)
+    builder.Services.AddHostedService<DeliveryWorker>();
+
+if (features.Aptio.Priority || features.Priority)
+    builder.Services.AddHostedService<PriorityWorker>();
+
+if (features.Aptio.TestNameDispose || features.TestNameDispose)
+    builder.Services.AddHostedService<TestNameDisposeWorker>();
+
+// WorkListCleaner (Immulite 组)
+if (features.Immulite.WorkListCleaner || features.ImmuliteWorkOrderClean)
 {
     builder.Services.AddSingleton<CentralinkService>();
     var cleanerConfigs = builder.Configuration.GetSection("WorkListCleaners")
@@ -112,8 +122,10 @@ if (features.ImmuliteWorkOrderClean)
     builder.Services.AddHostedService<WorkListCleanerWorker>();
 }
 
-// DMSAutoOrder
-if (features.DmsAutoOrder)
+// DMSAutoOrder (Dms 组独立开关)
+var dmsOn = features.Dms.PitStopMonitor || features.Dms.StatusCorrection
+    || features.Dms.SampleCleanup || features.DmsAutoOrder;
+if (dmsOn)
 {
     var dmsCfg = builder.Configuration.GetSection("DMS").Get<UniFlow.DMSAutoOrder.Models.DmsOrderConfig>() ?? new();
     builder.Services.AddSingleton(dmsCfg);
@@ -122,7 +134,13 @@ if (features.DmsAutoOrder)
     builder.Services.AddSingleton<PitStopMonitorService>();
     builder.Services.AddSingleton<SampleCleanupService>();
     builder.Services.AddSingleton<StatusCorrectionService>();
-    builder.Services.AddHostedService<DmsAutoOrderWorker>();
+
+    if (features.Dms.PitStopMonitor || features.DmsAutoOrder)
+        builder.Services.AddHostedService<DmsPitStopWorker>();
+    if (features.Dms.StatusCorrection || features.DmsAutoOrder)
+        builder.Services.AddHostedService<DmsStatusCorrectionWorker>();
+    if (features.Dms.SampleCleanup || features.DmsAutoOrder)
+        builder.Services.AddHostedService<DmsSampleCleanupWorker>();
 }
 
 // ===== WebAdmin =====
