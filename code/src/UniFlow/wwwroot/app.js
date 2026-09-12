@@ -24,18 +24,19 @@ document.querySelectorAll('.tab').forEach(tab => {
 // ===== Dashboard =====
 const FEATURE_MAP = {
   System: null,
-  DisposeSample: 'Aptio.DisposeSample',
-  SrmExport: 'Aptio.SrmExport',
-  Delivery: 'Aptio.Delivery',
-  DeliveryFile: 'Aptio.Delivery',
-  Priority: 'Aptio.Priority',
-  TestNameDispose: 'Aptio.TestNameDispose',
-  WorkListCleaner: 'Immulite.WorkListCleaner',
-  DmsAutoOrder: 'DmsAutoOrder',
-  DmsPitStop: 'Dms.PitStopMonitor',
-  DmsStatusCorr: 'Dms.StatusCorrection',
-  DmsCleanup: 'Dms.SampleCleanup',
+  DisposeSample: { path: 'Aptio.DisposeSample', group: 'Aptio' },
+  SrmExport: { path: 'Aptio.SrmExport', group: 'Aptio' },
+  Delivery: { path: 'Aptio.Delivery', group: 'Aptio' },
+  DeliveryFile: { path: 'Aptio.DeliveryFile', group: 'Aptio' },
+  Priority: { path: 'Aptio.Priority', group: 'Aptio' },
+  TestNameDispose: { path: 'Aptio.TestNameDispose', group: 'Aptio' },
+  WorkListCleaner: { path: 'Immulite.WorkListCleaner', group: 'Immulite' },
+  DmsPitStop: { path: 'Dms.PitStopMonitor', group: 'Dms' },
+  DmsStatusCorr: { path: 'Dms.StatusCorrection', group: 'Dms' },
+  DmsCleanup: { path: 'Dms.SampleCleanup', group: 'Dms' },
+  DmsEmptyResultCleanup: { path: 'Dms.EmptyResultCleanup', group: 'Dms' },
 };
+const GROUP_ORDER = ['Aptio', 'Dms'];  // Immulite 暂未使用，隐藏
 
 // 读取分组配置: cfg.Features["Aptio"]["DisposeSample"]
 function getFeatureVal(cfg, path) {
@@ -49,6 +50,13 @@ function getFeatureVal(cfg, path) {
   return cur;
 }
 
+async function loadVersion() {
+  const v = await api('/version');
+  if (v && v.informational) {
+    document.getElementById('appVersion').textContent = 'v' + v.informational;
+  }
+}
+
 async function loadHealth() {
   const [data, cfg] = await Promise.all([api('/health'), api('/config')]);
   if (!data) return;
@@ -59,33 +67,46 @@ async function loadHealth() {
   const container = document.getElementById('healthCards');
   container.innerHTML = '';
 
-  const summary = document.createElement('div');
-  summary.className = 'card';
-  summary.innerHTML = `<div class="label">系统概览</div>
-    <div class="value">${data.summary.healthy}/${data.summary.healthy + data.summary.degraded + data.summary.down}</div>
-    <div class="meta">健康 · 降级 · 宕机: ${data.summary.healthy} / ${data.summary.degraded} / ${data.summary.down}</div>`;
-  container.appendChild(summary);
-
+  // 按功能组分组展示
+  const groups = {};
   for (const [mod, info] of Object.entries(data.modules)) {
-    const card = document.createElement('div');
-    card.className = 'card ' + (info.status || 'unknown');
-    const featKey = FEATURE_MAP[mod];
-    // WorkListCleaner 各仪器模块名不在 FEATURE_MAP，回退到 Immulite.WorkListCleaner
-    let featPath = featKey;
-    if (featPath === undefined && mod !== 'System') featPath = 'Immulite.WorkListCleaner';
-    let featVal = featPath ? getFeatureVal(cfg, featPath) : null;
-    let isOn = featVal === true;
-    let toggleHtml = featPath ? `<span class="toggle-switch${isOn?' on':''}" style="vertical-align:middle;margin-left:4px"></span>` : '';
-    card.innerHTML = `<div class="label">${mod}${toggleHtml}</div>
-      <div class="value">${info.status === 'healthy' ? '✓' : info.status === 'degraded' ? '⚠' : '⏻'}</div>
-      <div class="meta">${info.timestamp || ''} ${info.message ? '· ' + info.message : ''}</div>`;
-    if (featPath) {
-      card.querySelector('.toggle-switch').onclick = function(e) {
-        e.stopPropagation();
-        api('/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:'Features:'+featPath, value:!isOn}) }).then(function(){ loadHealth(); });
-      };
+    if (mod === 'System' || mod === 'DmsAutoOrder' || mod === 'AptioBatchScanner') continue;  // 忽略系统、旧遗留与扫描器
+    const map = FEATURE_MAP[mod];
+    const group = map && map.group ? map.group : 'Immulite';  // 各仪器名归入 Immulite
+    if (!groups[group]) groups[group] = [];
+    groups[group].push({ mod, info, map });
+  }
+
+  for (const group of GROUP_ORDER) {
+    const items = groups[group];
+    if (!items || items.length === 0) continue;
+
+    // 分组标题
+    const hdr = document.createElement('div');
+    hdr.className = 'group-header';
+    hdr.textContent = group;
+    hdr.style.gridColumn = '1 / -1';
+    container.appendChild(hdr);
+
+    for (const { mod, info, map } of items) {
+      const card = document.createElement('div');
+      card.className = 'card ' + (info.status || 'unknown');
+      // map 存在但无 path → 无独立开关；map 不存在 → 仪器名，用 WorkListCleaner 开关
+      let featPath = map === undefined ? 'Immulite.WorkListCleaner' : (map && map.path ? map.path : null);
+      let featVal = featPath ? getFeatureVal(cfg, featPath) : null;
+      let isOn = featVal === true;
+      let toggleHtml = featPath ? `<span class="toggle-switch${isOn?' on':''}" style="vertical-align:middle;margin-left:4px"></span>` : '';
+      card.innerHTML = `<div class="label">${mod}${toggleHtml}</div>
+        <div class="value">${info.status === 'healthy' ? '✓' : info.status === 'degraded' ? '⚠' : '⏻'}</div>
+        <div class="meta">${info.timestamp || ''} ${info.message ? '· ' + info.message : ''}</div>`;
+      if (featPath) {
+        card.querySelector('.toggle-switch').onclick = function(e) {
+          e.stopPropagation();
+          api('/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:'Features:'+featPath, value:!isOn}) }).then(function(){ loadHealth(); });
+        };
+      }
+      container.appendChild(card);
     }
-    container.appendChild(card);
   }
 }
 
@@ -122,6 +143,12 @@ async function loadHealthHistory() {
 }
 
 // ===== Errors =====
+async function clearAllErrors() {
+  if (!confirm('确定清除所有错误记录？此操作不可恢复。')) return;
+  await api('/errors', { method: 'DELETE' });
+  loadErrors();
+}
+
 async function loadErrors() {
   const days = document.getElementById('errorDays').value;
   const level = document.getElementById('errorLevel').value;
@@ -314,6 +341,7 @@ function refreshAll() {
 
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
+  loadVersion();
   refreshAll();
   setInterval(loadHealth, 30000);
   setInterval(loadHealthHistory, 60000);

@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using UniFlow.Common.Services;
 
 namespace UniFlow.WebAdmin.Services;
 
@@ -7,11 +8,13 @@ public class HealthStore : IDisposable
     private readonly SqliteConnection _conn;
     private readonly ILogger<HealthStore> _logger;
     private readonly int _retentionDays;
+    private readonly ErrorReporter _reporter;
 
-    public HealthStore(string dbPath, ILogger<HealthStore> logger, int retentionDays = 30)
+    public HealthStore(string dbPath, ILogger<HealthStore> logger, int retentionDays = 30, ErrorReporter? reporter = null)
     {
         _logger = logger;
         _retentionDays = retentionDays;
+        _reporter = reporter ?? new ErrorReporter();
         _conn = new SqliteConnection($"Data Source={dbPath}");
         _conn.Open();
         InitDatabase();
@@ -59,7 +62,15 @@ public class HealthStore : IDisposable
         }
     }
 
-    public async Task RecordErrorAsync(string module, string level, string message)
+    // 入队：由专属 ErrorCollectorWorker 统一写库，避免业务线程阻塞
+    public Task RecordErrorAsync(string module, string level, string message)
+    {
+        _reporter.Report(module, level, message);
+        return Task.CompletedTask;
+    }
+
+    // 实际写入错误库（仅供 ErrorCollectorWorker 调用）
+    public async Task WriteErrorAsync(string module, string level, string message)
     {
         try
         {
@@ -135,6 +146,9 @@ public class HealthStore : IDisposable
         return results;
     }
 
+    // 超过该时长未上报的模块视为已停止（如已停用的功能），不参与异常统计
+    private static readonly TimeSpan StaleThreshold = TimeSpan.FromMinutes(5);
+
     public async Task<Dictionary<string, object>> GetLatestModuleStatusAsync()
     {
         var result = new Dictionary<string, object>();
@@ -150,10 +164,14 @@ public class HealthStore : IDisposable
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var status = reader.GetString(1);
+            var timestamp = reader.GetString(2);
+            if (DateTime.TryParse(timestamp, out var t) && DateTime.Now - t > StaleThreshold)
+                status = "stopped";
             result[reader.GetString(0)] = new Dictionary<string, object>
             {
-                ["status"] = reader.GetString(1),
-                ["timestamp"] = reader.GetString(2),
+                ["status"] = status,
+                ["timestamp"] = timestamp,
                 ["message"] = reader.IsDBNull(3) ? "" : reader.GetString(3)
             };
         }
@@ -169,9 +187,17 @@ public class HealthStore : IDisposable
             var s = ((Dictionary<string, object>)kv.Value)["status"]?.ToString();
             if (s == "healthy") h++;
             else if (s == "degraded") d++;
-            else dn++;
+            else if (s != "stopped") dn++;   // stopped（已停用/陈旧）不计入异常
         }
         return (h, d, dn);
+    }
+
+    // 清空全部错误记录
+    public async Task ClearErrorsAsync()
+    {
+        var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM error_records";
+        await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task CleanupOldAsync()

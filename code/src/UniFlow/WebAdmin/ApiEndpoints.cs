@@ -9,6 +9,17 @@ public static class ApiEndpoints
     {
         var api = app.MapGroup("/api");
 
+        // ===== Version =====
+        api.MapGet("/version", () =>
+        {
+            var version = typeof(ApiEndpoints).Assembly.GetName().Version?.ToString() ?? "unknown";
+            var informational = typeof(ApiEndpoints).Assembly
+                .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+                .FirstOrDefault()?.InformationalVersion ?? version;
+            return Results.Ok(new { version, informational });
+        });
+
         // ===== Health =====
         api.MapGet("/health", async () =>
         {
@@ -44,6 +55,12 @@ public static class ApiEndpoints
             var byLevel = records.GroupBy(r => r["level"]?.ToString() ?? "")
                 .Select(g => new { level = g.Key, count = g.Count() });
             return Results.Ok(new { total = records.Count, byModule, byLevel });
+        });
+
+        api.MapDelete("/errors", async () =>
+        {
+            await health.ClearErrorsAsync();
+            return Results.Ok(new { success = true });
         });
 
         // ===== Config =====

@@ -10,12 +10,14 @@ public class DmsDatabaseService
     private readonly ILogger<DmsDatabaseService> _logger;
     private readonly MySqlConnectionFactory _factory;
     private readonly Models.DmsOrderConfig _config;
+    private readonly IErrorReporter _errors;
 
-    public DmsDatabaseService(ILogger<DmsDatabaseService> logger, MySqlConnectionFactory factory, Models.DmsOrderConfig config)
+    public DmsDatabaseService(ILogger<DmsDatabaseService> logger, MySqlConnectionFactory factory, Models.DmsOrderConfig config, IErrorReporter errors)
     {
         _logger = logger;
         _factory = factory;
         _config = config;
+        _errors = errors;
     }
 
     public MySqlConnection NewConnection() => _factory.Create();
@@ -93,22 +95,49 @@ public class DmsDatabaseService
             ORDER BY table_name", new { Col = columnName, Db = _config.DbName })).ToList();
     }
 
-    public async Task DeleteSampleAsync(string sid, string oid, List<string> deleteTableSqlTemplates)
+    public async Task<int> DeleteSampleAsync(string sid, string oid, List<string> deleteTableSqlTemplates)
     {
         using var conn = NewConnection();
+        var total = 0;
+        var okTables = 0;
+        var failedTables = 0;
         foreach (var template in deleteTableSqlTemplates)
         {
-            var sql = string.Format(template, sid, oid);
+            var sql = template;
             try
             {
-                await conn.ExecuteAsync(sql);
+                var affected = await conn.ExecuteAsync(sql, new { sid, oid });
+                okTables++;
+                if (affected > 0)
+                {
+                    total += affected;
+                    _logger.LogInformation("Delete rows: {Count} | {Sql}", affected, sql);
+                }
             }
             catch (Exception ex)
             {
+                failedTables++;
                 _logger.LogError(ex, "Delete sample failed: Sid={Sid}, Oid={Oid}, SQL={Sql}", sid, oid, sql);
+                _errors.Report("DmsCleanup", "ERROR", $"Delete sample failed: Sid={sid}, Oid={oid}, SQL={sql} | {ex.Message}");
             }
         }
-        _logger.LogInformation("Deleted sample records: Sid={Sid}, Oid={Oid}, Tables={Count}",
-            sid, oid, deleteTableSqlTemplates.Count);
+
+        if (failedTables == 0)
+            _logger.LogInformation("Sample deleted: Sid={Sid}, Oid={Oid}, TotalRows={Total}, Tables={Ok}",
+                sid, oid, total, okTables);
+        else
+            _logger.LogWarning("Sample delete incomplete: Sid={Sid}, Oid={Oid}, TotalRows={Total}, OkTables={Ok}, FailedTables={Failed}",
+                sid, oid, total, okTables, failedTables);
+        return total;
+    }
+
+    public async Task<string> GetOidBySidAsync(string sid)
+    {
+        using var conn = NewConnection();
+        var oid = await conn.QueryFirstOrDefaultAsync<string>(
+            $"SELECT codoid FROM {_config.DbName}.reqtube " +
+            $"WHERE codsid = @Sid AND codoid IS NOT NULL AND codoid <> '' LIMIT 1",
+            new { Sid = sid });
+        return oid ?? "";
     }
 }

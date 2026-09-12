@@ -12,8 +12,10 @@ public class SrmExportWorker : BackgroundService
     private readonly Services.IExportFileService _export;
     private readonly HealthStore _health;
     private AptioConfig _aptio = default!;
-    private AptioAutoExportConfig _ec = new();
+    private AptioSrmExportConfig _ec = new();
+    private FeatureConfig _features = new();
     private bool _exportedToday;
+    private bool _pauseReported;
 
     public SrmExportWorker(
         ILogger<SrmExportWorker> logger,
@@ -39,11 +41,12 @@ public class SrmExportWorker : BackgroundService
             {
                 try { _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new(); }
                 catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, using defaults: {Raw}", ap.GetRawText()); _aptio = new(); }
+                _ec = _aptio.SrmExport;
             }
-            if (doc.TryGetValue("AptioAutoProcess", out var aa))
+            if (doc.TryGetValue("Features", out var fe))
             {
-                var aap = JsonSerializer.Deserialize<AptioAutoProcessConfig>(aa.GetRawText());
-                if (aap != null) _ec = aap.Export ?? new();
+                try { _features = JsonSerializer.Deserialize<FeatureConfig>(fe.GetRawText()) ?? new(); }
+                catch { _features = new(); }
             }
         }
         catch (Exception ex)
@@ -60,6 +63,17 @@ public class SrmExportWorker : BackgroundService
         while (!ct.IsCancellationRequested)
         {
             RefreshConfig();
+            if (!_features.Aptio.SrmExport)
+            {
+                if (!_pauseReported)
+                {
+                    try { await _health.RecordHealthAsync("SrmExport", "stopped"); } catch { }
+                    _pauseReported = true;
+                }
+                try { await Task.Delay(5000, ct); } catch (OperationCanceledException) { break; }
+                continue;
+            }
+            _pauseReported = false;
             try
             {
                 var now = DateTime.Now;
@@ -88,7 +102,8 @@ public class SrmExportWorker : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _logger.LogError(ex, "Export error"); try { await _health.RecordHealthAsync("SrmExport", "degraded", ex.Message); await _health.RecordErrorAsync("SrmExport", "ERROR", ex.Message); } catch { } }
 
-            await Task.Delay(TimeSpan.FromSeconds(_ec.LoopIntervalSeconds), ct);
+            try { await Task.Delay(TimeSpan.FromSeconds(_ec.LoopIntervalSeconds), ct); }
+            catch (OperationCanceledException) { break; }
         }
     }
 

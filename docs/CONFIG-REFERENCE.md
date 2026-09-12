@@ -36,7 +36,8 @@
 |------|------|--------|------|
 | `Aptio.DisposeSample` | bool | `true` | 样本丢弃 |
 | `Aptio.SrmExport` | bool | `true` | SRM 数据导出 |
-| `Aptio.Delivery` | bool | `false` | 标本递送 |
+| `Aptio.Delivery` | bool | `false` | 按测试名触发 delivery |
+| `Aptio.DeliveryFile` | bool | `false` | delivery 清单文件递送（独立于测试名 delivery） |
 | `Aptio.Priority` | bool | `false` | 优先级控制 |
 | `Aptio.TestNameDispose` | bool | `false` | 按测试名丢弃 |
 
@@ -53,12 +54,15 @@
 | `Dms.PitStopMonitor` | bool | `false` | PitStop 监控 |
 | `Dms.StatusCorrection` | bool | `false` | 状态修正 |
 | `Dms.SampleCleanup` | bool | `false` | 样本清理 |
+| `Dms.EmptyResultCleanup` | bool | `false` | 空结果清理 |
 
 > Web 仪表盘页提供滑块开关，与这些字段一一对应（路径格式 `Features:Aptio.DisposeSample` 等）。
 
 ---
 
 ## Aptio（仪器连接，需重启）
+
+### 公共配置
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -71,59 +75,72 @@
 | `Database.Password` | string | `root` | MySQL 密码 |
 | `Database.Database` | string | `flexlab` | MySQL 数据库名 |
 
----
-
-## AptioAutoProcess.Dispose（样本丢弃参数，需重启）
+### Aptio.DisposeSample（样本丢弃，对应 `Features.Aptio.DisposeSample`）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `CommandType` | int | `0` | 命令类型（0=视图，其他=存储过程） |
-| `CommandName` | string | `view_overtimestoragesample` | 查询命令名/视图名 |
-| `DiscardRunDate` | string | `1,2,3,4,5,6,7` | 运行日期（1-7 周一~周日，逗号分隔） |
-| `DiscardTimeRange` | string | `01:30-05:45,3800;18:00-07:00,7500;` | 丢弃时间段与阈值：`开始-结束,阈值;` 分号分隔 |
-| `LoopIntervalSeconds` | int | `3` | 循环间隔(秒) |
-| `MaxWaitDiscardCount` | int | `2` | 最大等待确认次数 |
-| `MaxOnetimeSelectDiscardCount` | int | `8` | 单次最大选择丢弃数 |
-| `AllowSrmErrorCode` | string | `0000,0F0A,0E59,AAAA` | 允许的 SRM 错误码（逗号分隔） |
-| `EnableTestNameDispose` | bool | `false` | 是否启用按测试名丢弃 |
-| `DisposeTestName` | string | `` | 测试名（配合 EnableTestNameDispose） |
-| `SkipOnUnknownNode` | bool | `true` | 未知节点是否跳过 |
+| `DisposeSample.CommandType` | int | `0` | 命令类型（0=视图，其他=存储过程） |
+| `DisposeSample.CommandName` | string | `view_overtimestoragesample` | 查询命令名/视图名 |
+| `DisposeSample.DiscardRunDate` | string | `1,2,3,4,5,6,7` | 运行日期（1-7 周一~周日） |
+| `DisposeSample.DiscardTimeRange` | string | `01:30-05:45,3800;18:00-07:00,7500;` | 丢弃时间段与阈值 |
+| `DisposeSample.LoopIntervalSeconds` | int | `3` | 循环间隔(秒) |
+| `DisposeSample.MaxWaitDiscardCount` | int | `2` | 最大等待确认次数 |
+| `DisposeSample.MaxOnetimeSelectDiscardCount` | int | `8` | 单次最大选择丢弃数 |
+| `DisposeSample.AllowSrmErrorCode` | string | `0000,0F0A,0E59,AAAA` | 允许的 SRM 错误码 |
+| `DisposeSample.SkipOnUnknownNode` | bool | `true` | 未知节点是否跳过 |
 
----
-
-## AptioAutoProcess.Deliver（标本递送，需重启）
+### Aptio.SrmExport（SRM 导出，对应 `Features.Aptio.SrmExport`）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `Enabled` | bool | `false` | 递送功能开关 |
-| `TestName` | string | `` | 递送测试名 |
-| `DeliveryListFilePath` | string | `` | 递送清单文件目录路径 |
+| `SrmExport.ExportTime` | string | `08:30` | 每日导出时间(HH:mm) |
+| `SrmExport.LoopIntervalSeconds` | int | `60` | 导出检查循环间隔(秒) |
+| `SrmExport.LogRetentionDays` | int | `30` | 导出文件保留天数 |
+| `SrmExport.OutputPath` | string | `DisposeFile` | 导出目录（相对安装目录或绝对路径） |
 
-> 需同时开启 `Features.Delivery=true` 才生效。
+> 支持绝对路径（如 `/data/exports` 或 `D:\exports`），相对路径按安装目录拼接。
 
----
-
-## AptioAutoProcess.Priority（优先级，需重启）
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `Enabled` | bool | `false` | 优先级功能开关 |
-| `TestName` | string | `` | 优先级测试名 |
-
-> 需同时开启 `Features.Priority=true` 才生效。
-
----
-
-## AptioAutoProcess.Export（SRM 导出，需重启）
+### Aptio.Delivery（按测试名 delivery，对应 `Features.Aptio.Delivery`）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `ExportTime` | string | `08:30` | 每日导出时间(HH:mm) |
-| `LoopIntervalSeconds` | int | `60` | 导出检查循环间隔(秒) |
-| `LogRetentionDays` | int | `30` | 导出文件保留天数 |
-| `OutputPath` | string | `DisposeFile` | 导出文件目录（相对安装目录） |
+| `Delivery.TestName` | string | `` | delivery 测试名（完全匹配 `test` 字段第 5 段） |
 
-> v1.0.5.2 修复：导出文件直接写到 `<OutputPath>/` 单一目录（不再有 `DisposeFile/DisposeFile` 双重嵌套）。
+### Aptio.DeliveryFile（清单文件递送，对应 `Features.Aptio.DeliveryFile`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `DeliveryFile.DeliveryListFilePath` | string | `` | delivery 清单文件目录路径 |
+| `DeliveryFile.LoopIntervalSeconds` | int | `60` | 文件检查循环间隔(秒) |
+
+> 与 `Delivery`（测试名触发）是两个独立功能，各自独立开关。
+
+### Aptio.Priority（优先级，对应 `Features.Aptio.Priority`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `Priority.TestName` | string | `` | 优先级测试名（完全匹配 `test` 字段第 5 段） |
+
+### Aptio.TestNameDispose（按测试名丢弃，对应 `Features.Aptio.TestNameDispose`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `TestNameDispose.DisposeTestName` | string | `` | 按测试名丢弃的测试名（完全匹配 `test` 字段第 5 段） |
+
+### Aptio.BatchScan（测试触发共享扫描，无独立开关）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `BatchScan.LoopIntervalSeconds` | int | `60` | 数据库扫描间隔(秒) |
+| `BatchScan.MaxOnetimeScanCount` | int | `500` | 单次扫描最大样本数 |
+
+> **无独立开关**：任一测试触发功能（Delivery / Priority / TestNameDispose）开启即自动启用，防止误关导致测试触发功能失效。
+
+> **工作方式（两阶段）**：
+> 1. **SQL 初筛**：扫描器一次查询 `t_sample`，用各注册功能测试名的并集做 `OR LIKE` 粗筛（参数化），只拉取可能匹配的行，减少传输量；
+> 2. **内存分发**：逐行解析 `test` 字段第 5 段做**完全匹配**，命中注册者且对应功能开关开启时，推送到该 Worker 的队列；未开启的功能不推送。
+
+> **扩展新测试触发任务**：只需新建 Worker（构造时 `router.Register(name, testName, 匹配委托, 自持Channel, 开关委托)`）并在 Program.cs 注册一行 HostedService，扫描器与 Router 无需修改。
 
 ---
 
@@ -149,7 +166,7 @@
 | `NaResultLasFlag` | string | `NA` | NA 结果 LAS 标志 |
 | `NaResultSqlWhere` | string | `` | NA 结果 SQL 过滤条件 |
 
-> 需开启 `Features.ImmuliteWorkOrderClean=true`；MS Access 依赖仅 Windows 可用。
+> 需开启 `Features.Immulite.WorkListCleaner=true`；MS Access 依赖仅 Windows 可用。
 
 ---
 
@@ -165,7 +182,9 @@
 
 ---
 
-## DMS（DMS 自动下单，需先开 `Features.DmsAutoOrder`，需重启）
+## DMS（DMS 自动下单，需先开对应 `Features.Dms.*` 开关，需重启）
+
+### 公共配置（三个功能共用）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -176,13 +195,38 @@
 | `DbPassword` | string | `` | DMS 数据库密码 |
 | `DbName` | string | `dms` | DMS 数据库名 |
 | `LoopIntervalSeconds` | int | `60` | 循环间隔(秒) |
-| `EnablePitStopMonitor` | bool | `false` | 是否启用 PitStop 监控 |
-| `PitStopTimeoutMinutes` | int | `1` | PitStop 超时判定(分钟) |
-| `AutoModifyTestStatus` | string | `1` | 状态修正模式：1=不修正，2=同步模式，3=强制F模式 |
-| `IgnoreFlagList` | string | `` | 忽略标志列表（逗号分隔） |
-| `TestTriggerSampleDeletion` | string | `` | 触发样本删除的测试名（`测试名:超时分钟;`） |
-| `DeleteTableList` | string | `` | 删除涉及的表列表 |
-| `SendCancelMessageToAptio` | bool | `false` | 删除时是否发送取消消息到 Aptio |
+
+### DMS.PitStop（PitStop 监控，对应 `Features.Dms.PitStopMonitor`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `PitStop.EnableMonitor` | bool | `false` | 是否启用 PitStop 监控 |
+| `PitStop.TimeoutMinutes` | int | `1` | PitStop 超时判定(分钟) |
+
+### DMS.StatusCorrection（状态修正，对应 `Features.Dms.StatusCorrection`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `StatusCorrection.AutoModifyTestStatus` | string | `1` | 修正模式：1=不修正，2=同步，3=强制F |
+| `StatusCorrection.IgnoreFlagList` | string | `` | 忽略标志列表（逗号分隔） |
+
+> 注：清理 `reqtestresult` 中的错误/空结果（`flgstatus` E/R/P 或 `valresult1` 空）已独立为 `DMS.EmptyResultCleanup` 功能，不再随状态修正执行。
+
+### DMS.EmptyResultCleanup（空结果清理，对应 `Features.Dms.EmptyResultCleanup`）
+
+清理 `reqtestresult` 中 `flgstatus` 为 `E`/`R`/`P` 或 `valresult1` 为空的记录。
+
+- 无独立子配置字段（使用公共 `LoopIntervalSeconds`）
+- 被清理的记录（`codsid` / `codtest`）逐条写入日志
+
+### DMS.SampleCleanup（样本清理，对应 `Features.Dms.SampleCleanup`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `SampleCleanup.TestTriggerSampleDeletion` | string | `` | 触发样本删除的测试名（`测试名:超时分钟;`） |
+| `SampleCleanup.SendCancelMessageToAptio` | bool | `false` | 删除样本时是否发送取消消息到 Aptio（取消整个样本） |
+
+> 删除表列表由程序动态扫描 `information_schema`（含 `codsid`/`codoid` 列的表）自动生成，无需配置。
 
 ---
 

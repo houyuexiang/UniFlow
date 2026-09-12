@@ -4,18 +4,18 @@ using UniFlow.WebAdmin.Services;
 
 namespace UniFlow.DMSAutoOrder.Workers;
 
-public class DmsStatusCorrectionWorker : BackgroundService
+public class DmsEmptyResultCleanupWorker : BackgroundService
 {
-    private readonly ILogger<DmsStatusCorrectionWorker> _logger;
-    private readonly Services.StatusCorrectionService _svc;
+    private readonly ILogger<DmsEmptyResultCleanupWorker> _logger;
+    private readonly Services.EmptyResultCleanupService _svc;
     private readonly Models.DmsOrderConfig _config;
     private readonly HealthStore _health;
     private readonly IOptionsMonitor<FeatureConfig> _features;
     private bool _pauseReported;
 
-    public DmsStatusCorrectionWorker(
-        ILogger<DmsStatusCorrectionWorker> logger,
-        Services.StatusCorrectionService svc,
+    public DmsEmptyResultCleanupWorker(
+        ILogger<DmsEmptyResultCleanupWorker> logger,
+        Services.EmptyResultCleanupService svc,
         Models.DmsOrderConfig config,
         HealthStore health,
         IOptionsMonitor<FeatureConfig> features)
@@ -29,15 +29,15 @@ public class DmsStatusCorrectionWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        _logger.LogInformation("DmsStatusCorr started, interval={Interval}s", _config.LoopIntervalSeconds);
+        _logger.LogInformation("DmsEmptyResultCleanup started, interval={Interval}s", _config.LoopIntervalSeconds);
 
         while (!ct.IsCancellationRequested)
         {
-            if (!_features.CurrentValue.Dms.StatusCorrection)
+            if (!_features.CurrentValue.Dms.EmptyResultCleanup)
             {
                 if (!_pauseReported)
                 {
-                    try { await _health.RecordHealthAsync("DmsStatusCorr", "stopped"); } catch { }
+                    try { await _health.RecordHealthAsync("DmsEmptyResultCleanup", "stopped"); } catch { }
                     _pauseReported = true;
                 }
                 try { await Task.Delay(5000, ct); } catch (OperationCanceledException) { break; }
@@ -47,13 +47,13 @@ public class DmsStatusCorrectionWorker : BackgroundService
             try
             {
                 await _svc.ExecuteAsync(ct);
-                try { await _health.RecordHealthAsync("DmsStatusCorr", "healthy"); } catch { }
+                try { await _health.RecordHealthAsync("DmsEmptyResultCleanup", "healthy"); } catch { }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DmsStatusCorr error");
-                try { await _health.RecordHealthAsync("DmsStatusCorr", "degraded", ex.Message); await _health.RecordErrorAsync("DmsStatusCorr", "ERROR", ex.Message); } catch { }
+                _logger.LogError(ex, "DmsEmptyResultCleanup error");
+                try { await _health.RecordHealthAsync("DmsEmptyResultCleanup", "degraded", ex.Message); await _health.RecordErrorAsync("DmsEmptyResultCleanup", "ERROR", ex.Message); } catch { }
             }
 
             try { await Task.Delay(TimeSpan.FromSeconds(_config.LoopIntervalSeconds), ct); }

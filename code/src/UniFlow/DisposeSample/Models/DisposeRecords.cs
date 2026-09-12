@@ -32,4 +32,5 @@ public class SampleRecord
     public string? UpdateTime { get; set; }
     public string? Res1 { get; set; }
     public string? Res2 { get; set; }
+    public string? TestName { get; set; }
 }

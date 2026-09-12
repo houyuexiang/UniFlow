@@ -17,15 +17,14 @@ public class DisposeSampleWorker : BackgroundService
     private readonly HealthStore _health;
     private FeatureConfig _features;
     private AptioConfig _aptio = default!;
-    private AptioAutoDisposeConfig _dc = new();
-    private AptioAutoDeliverConfig? _dlv;
-    private AptioAutoPriorityConfig? _prt;
+    private AptioDisposeSampleConfig _dc = new();
     private HashSet<int> _runDays = new();
     private List<TimeRange> _timeRanges = new();
     private HashSet<string> _allowErrors = new();
     private SysStatus _state = SysStatus.None;
     private string? _preBarcode;
     private int _connectRetries;
+    private bool _pauseReported;
 
     public DisposeSampleWorker(
         ILogger<DisposeSampleWorker> logger,
@@ -42,9 +41,6 @@ public class DisposeSampleWorker : BackgroundService
         _statusDecoder = statusDecoder;
         _health = health;
         RefreshConfig();
-
-        _socket.Host = _aptio.Ip;
-        _socket.Port = _aptio.Port;
     }
 
     private void RefreshConfig()
@@ -59,11 +55,7 @@ public class DisposeSampleWorker : BackgroundService
             {
                 try { _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new(); }
                 catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, using defaults: {Raw}", ap.GetRawText()); _aptio = new(); }
-            }
-            if (doc.TryGetValue("AptioAutoProcess", out var aa))
-            {
-                var aap = JsonSerializer.Deserialize<AptioAutoProcessConfig>(aa.GetRawText());
-                if (aap != null) { _dc = aap.Dispose ?? new(); _dlv = aap.Deliver; _prt = aap.Priority; }
+                _dc = _aptio.DisposeSample;
             }
             _runDays = WorkTimeChecker.ParseRunDays(_dc.DiscardRunDate);
             _timeRanges = WorkTimeChecker.ParseTimeRanges(_dc.DiscardTimeRange);
@@ -84,11 +76,28 @@ public class DisposeSampleWorker : BackgroundService
     {
         _logger.LogInformation("DisposeSample started, node={NodeId}, interval={Interval}s",
             _aptio.SrmNodeIds.FirstOrDefault() ?? "?", _dc.LoopIntervalSeconds);
-        await Task.Delay(3000, ct);
+        try { await Task.Delay(3000, ct); }
+        catch (OperationCanceledException) { return; }
+
+        // sam_dispose_status 表不存在时自动创建
+        try { await _db.EnsureSamDisposeTableAsync(); }
+        catch (Exception ex) { _logger.LogWarning("Ensure sam_dispose_status failed: {Msg}", ex.Message); }
 
         while (!ct.IsCancellationRequested)
         {
             RefreshConfig();
+            if (!_features.Aptio.DisposeSample)
+            {
+                // 关闭时上报一次 stopped，立即从健康统计中排除
+                if (!_pauseReported)
+                {
+                    try { await _health.RecordHealthAsync("DisposeSample", "stopped"); } catch { }
+                    _pauseReported = true;
+                }
+                try { await Task.Delay(5000, ct); } catch (OperationCanceledException) { break; }
+                continue;
+            }
+            _pauseReported = false;
             try
             {
                 if (!await EnsureConnectedAsync(ct))
@@ -103,7 +112,8 @@ public class DisposeSampleWorker : BackgroundService
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _logger.LogError(ex, "Worker error"); try { await _health.RecordHealthAsync("DisposeSample", "degraded", ex.Message); await _health.RecordErrorAsync("DisposeSample", "ERROR", ex.Message); } catch { } }
 
-            await Task.Delay(_dc.LoopIntervalSeconds * 1000, ct);
+            try { await Task.Delay(_dc.LoopIntervalSeconds * 1000, ct); }
+            catch (OperationCanceledException) { break; }
         }
 
         try { await _db.DeleteUnsendAsync(); _logger.LogInformation("DisposeSample stopped"); }

@@ -23,21 +23,10 @@ public class StatusCorrectionService
     {
         try
         {
-            // Clean error/empty results
-            var cleanSql = $"DELETE FROM {_config.DbName}.reqtestresult WHERE flgstatus IN ('E','R','P') OR valresult1 = ''";
-            try
-            {
-                var n = await _db.ExecuteSqlAsync(cleanSql);
-                if (n > 0) _logger.LogInformation("Cleaned error/empty results: Count={Count}", n);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Clean error results failed: SQL={Sql}", cleanSql);
-            }
+            // 空结果清理已独立为 DMS.EmptyResultCleanup 功能（EmptyResultCleanupService）
+            if (_config.StatusCorrection.AutoModifyTestStatus == "1") return;
 
-            if (_config.AutoModifyTestStatus == "1") return;
-
-            if (_config.AutoModifyTestStatus == "2")
+            if (_config.StatusCorrection.AutoModifyTestStatus == "2")
             {
                 var sql1 = $"UPDATE {_config.DbName}.reqtest SET flgtohost = 0 WHERE flgstatus IN ('V','X','Y','Z') AND flgtohost <> 0";
                 var sql2 = $"UPDATE {_config.DbName}.reqtest t, {_config.DbName}.reqtestresult r " +
@@ -66,7 +55,7 @@ public class StatusCorrectionService
                 }
             }
 
-            if (_config.AutoModifyTestStatus == "3")
+            if (_config.StatusCorrection.AutoModifyTestStatus == "3")
             {
                 var sql1 = $"UPDATE {_config.DbName}.reqtestresult, {_config.DbName}.reqtest " +
                            $"SET reqtestresult.flgstatus = 'F' " +
@@ -101,7 +90,7 @@ public class StatusCorrectionService
             }
 
             // Handle IgnoreFlagList
-            if (!string.IsNullOrEmpty(_config.IgnoreFlagList))
+            if (!string.IsNullOrEmpty(_config.StatusCorrection.IgnoreFlagList))
                 await ProcessIgnoreFlagsAsync();
         }
         catch (Exception ex)
@@ -126,8 +115,10 @@ public class StatusCorrectionService
 
     private async Task ProcessIgnoreFlagsAsync()
     {
-        var flags = _config.IgnoreFlagList.Split(',', StringSplitOptions.RemoveEmptyEntries);
-        var sql = $"SELECT codsid, codtest FROM {_config.DbName}.reqtestresult " +
+        var ignoreFlags = _config.StatusCorrection.IgnoreFlagList.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        if (ignoreFlags.Length == 0) return;
+
+        var sql = $"SELECT codsid, codtest, jsnflaginstrument FROM {_config.DbName}.reqtestresult " +
                   $"WHERE flgstatus NOT IN ('F','V','X','Y','Z')";
         using var conn = _db.NewConnection();
         await conn.OpenAsync();
@@ -137,21 +128,39 @@ public class StatusCorrectionService
         {
             var sid = reader["codsid"].ToString();
             var test = reader["codtest"].ToString();
-            if (!string.IsNullOrEmpty(sid) && !string.IsNullOrEmpty(test))
+            var jsn = reader["jsnflaginstrument"]?.ToString() ?? "";
+
+            // 解析 jsnflaginstrument JSON 里的 flags（如 ["flag1","flag2"]），命中 IgnoreFlagList 才处理
+            if (!IsIgnoredFlag(jsn, ignoreFlags)) continue;
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(test)) continue;
+
+            var sql1 = $"UPDATE {_config.DbName}.reqtestresult SET flgstatus = 'V' WHERE codsid = @Sid AND codtest = @Test";
+            var sql2 = $"UPDATE {_config.DbName}.reqtest SET flgstatus = 'V', flgtohost = 0 WHERE codsid = @Sid AND codtest = @Test";
+            try
             {
-                var sql1 = $"UPDATE {_config.DbName}.reqtestresult SET flgstatus = 'V' WHERE codsid = @Sid AND codtest = @Test";
-                var sql2 = $"UPDATE {_config.DbName}.reqtest SET flgstatus = 'V', flgtohost = 0 WHERE codsid = @Sid AND codtest = @Test";
-                try
-                {
-                    await _db.ExecuteSqlAsync(sql1, new { Sid = sid, Test = test });
-                    await _db.ExecuteSqlAsync(sql2, new { Sid = sid, Test = test });
-                    _logger.LogInformation("Ignore-flag corrected: Sid={Sid}, Test={Test}", sid, test);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Ignore-flag correction failed: Sid={Sid}, Test={Test}, SQL={Sql}", sid, test, $"{sql1}; {sql2}");
-                }
+                await _db.ExecuteSqlAsync(sql1, new { Sid = sid, Test = test });
+                await _db.ExecuteSqlAsync(sql2, new { Sid = sid, Test = test });
+                _logger.LogInformation("Ignore-flag corrected: Sid={Sid}, Test={Test}", sid, test);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ignore-flag correction failed: Sid={Sid}, Test={Test}, SQL={Sql}", sid, test, $"{sql1}; {sql2}");
             }
         }
+    }
+
+    private static bool IsIgnoredFlag(string jsnflaginstrument, string[] ignoreFlags)
+    {
+        if (string.IsNullOrEmpty(jsnflaginstrument) || !jsnflaginstrument.StartsWith("[")) return false;
+        // 去掉首尾 [] 和双引号，按逗号拆分
+        var inner = jsnflaginstrument.Substring(1, jsnflaginstrument.Length - 2)
+            .Replace("\"", "");
+        var flags = inner.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var flag in flags)
+        {
+            if (ignoreFlags.Contains(flag.Trim()))
+                return true;
+        }
+        return false;
     }
 }

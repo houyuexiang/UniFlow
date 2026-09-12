@@ -36,6 +36,45 @@ public class DisposeDatabaseService : IDisposeDatabaseService
         }
     }
 
+    // sam_dispose_status 表不存在时自动创建（避免启动报错）
+    public async Task EnsureSamDisposeTableAsync()
+    {
+        var sql = """
+            CREATE TABLE IF NOT EXISTS sam_dispose_status (
+                ID INT NOT NULL AUTO_INCREMENT,
+                barcode VARCHAR(25) NOT NULL,
+                patient VARCHAR(61),
+                stype VARCHAR(4),
+                location VARCHAR(34),
+                update_time VARCHAR(15),
+                res_1 VARCHAR(12),
+                res_2 VARCHAR(12),
+                rack VARCHAR(34),
+                send INT DEFAULT 0,
+                send_time VARCHAR(15),
+                disposed INT DEFAULT 0,
+                disposed_time VARCHAR(15),
+                checkcount INT DEFAULT 0,
+                check_time VARCHAR(15),
+                PRIMARY KEY (ID),
+                INDEX idx_barcode (barcode),
+                INDEX idx_send (send)
+            )
+            """;
+        try
+        {
+            using var conn = NewConnection();
+            await conn.OpenAsync();
+            await conn.ExecuteAsync(sql);
+            _logger.LogInformation("sam_dispose_status table ensured");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ensure sam_dispose_status table failed");
+            throw;
+        }
+    }
+
     public async Task<int> CheckSrmSampleCountAsync(string nodeId)
     {
         using var conn = NewConnection();
@@ -191,53 +230,33 @@ public class DisposeDatabaseService : IDisposeDatabaseService
         }
     }
 
-    public async Task<List<SampleRecord>> GetDeliverRecordsAsync(string deliverTestName, int maxCount)
+    public async Task<List<SampleRecord>> GetAllScanableSamplesAsync(int maxCount, IReadOnlyCollection<string>? candidateTestNames = null)
     {
         using var conn = NewConnection();
         await conn.OpenAsync();
-        return (await conn.QueryAsync<SampleRecord>(@"
-            SELECT sample_id AS Barcode FROM t_sample
-            WHERE t_status='C' AND t_location LIKE '&1-%'
-            AND test LIKE @TestName
-            LIMIT @Max", new { TestName = $"%{deliverTestName}%", Max = maxCount })).AsList();
-    }
 
-    public async Task<List<SampleRecord>> GetPriorityRecordsAsync(string priorityTestName, int maxCount)
-    {
-        using var conn = NewConnection();
-        await conn.OpenAsync();
-        return (await conn.QueryAsync<SampleRecord>(@"
-            SELECT sample_id AS Barcode FROM t_sample
-            WHERE t_status='C' AND t_location LIKE '&1-%'
-            AND test LIKE @TestName
-            LIMIT @Max", new { TestName = $"%{priorityTestName}%", Max = maxCount })).AsList();
-    }
+        // t_sample 的 test 分列存储：test_1..test_80，每列格式 "状态;序号;类型;子类型;测试名;..."
+        // 用 CONCAT_WS 拼接所有 test 列（^ 分隔，与列内 ; 区分），由内存侧按 ^ 拆列逐列匹配
+        var testCols = string.Join(",", Enumerable.Range(1, 80).Select(i => $"test_{i}"));
+        var sql = $@"SELECT sample_id AS Barcode, CONCAT_WS('^', {testCols}) AS TestName FROM t_sample
+            WHERE t_status='C' AND t_location LIKE '&1-%'";
+        var p = new DynamicParameters();
 
-    public async Task<List<SampleRecord>> GetTestNameDisposeRecordsAsync(string disposeTestName, int maxCount)
-    {
-        using var conn = NewConnection();
-        await conn.OpenAsync();
-        return (await conn.QueryAsync<SampleRecord>(@"
-            SELECT sample_id AS Barcode FROM t_sample
-            WHERE t_status='C' AND t_location LIKE '&1-%'
-            AND test LIKE @TestName
-            LIMIT @Max", new { TestName = $"%{disposeTestName}%", Max = maxCount })).AsList();
-    }
-
-    public async Task SetPriorityDoneAsync(string barcode)
-    {
-        using var conn = NewConnection();
-        await conn.OpenAsync();
-        var sql = "UPDATE sam_dispose_status SET disposed=1 WHERE barcode=@B";
-        try
+        var names = candidateTestNames?.Where(n => !string.IsNullOrWhiteSpace(n)).ToList();
+        if (names is { Count: > 0 })
         {
-            await conn.ExecuteAsync(sql, new { B = barcode });
-            _logger.LogInformation("Priority done set: Barcode={Barcode}", barcode);
+            var clauses = new List<string>();
+            for (var i = 0; i < names.Count; i++)
+            {
+                var pn = $"t{i}";
+                p.Add(pn, $"%{names[i]}%");
+                clauses.Add($"CONCAT_WS('^', {testCols}) LIKE @{pn}");
+            }
+            sql += " AND (" + string.Join(" OR ", clauses) + ")";
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Set priority done failed: Barcode={Barcode}, SQL={Sql}", barcode, sql);
-        }
+        // 初筛后匹配样本有限，不设 LIMIT，避免截断漏样本；
+        // 单轮处理上限由 Router 分发处控制（MaxOnetimeScanCount）
+        return (await conn.QueryAsync<SampleRecord>(sql, p)).AsList();
     }
 
     private static string GetLocationRackNo(string? loc)

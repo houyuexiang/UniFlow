@@ -1,8 +1,8 @@
-using System.Net.Sockets;
 using System.Text;
 using Dapper;
 using Microsoft.Extensions.Logging;
 using UniFlow.Common.Models;
+using UniFlow.Common.Services;
 
 namespace UniFlow.DMSAutoOrder.Services;
 
@@ -11,8 +11,11 @@ public class SampleCleanupService
     private readonly ILogger<SampleCleanupService> _logger;
     private readonly DmsDatabaseService _db;
     private readonly Models.DmsOrderConfig _config;
-    private readonly AptioConfig _aptio;
+    private readonly IAptioSocketClient _aptioSocket;
+    private readonly IErrorReporter _errors;
     private List<string>? _deleteSqlTemplates;
+    private DateTime _deleteSqlBuiltAt = DateTime.MinValue;
+    private static readonly TimeSpan DeleteSqlRefreshInterval = TimeSpan.FromDays(1);
     private const string CR = "\r";
     private const string LF = "\n";
 
@@ -20,12 +23,14 @@ public class SampleCleanupService
         ILogger<SampleCleanupService> logger,
         DmsDatabaseService db,
         Models.DmsOrderConfig config,
-        AptioConfig aptio)
+        IAptioSocketClient aptioSocket,
+        IErrorReporter errors)
     {
         _logger = logger;
         _db = db;
         _config = config;
-        _aptio = aptio;
+        _aptioSocket = aptioSocket;
+        _errors = errors;
     }
 
     public async Task ExecuteAsync(CancellationToken ct = default)
@@ -38,20 +43,20 @@ public class SampleCleanupService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Sample cleanup error");
+            _errors.Report("DmsCleanup", "ERROR", ex.Message);
         }
     }
 
     private async Task SendCancelToAptioAsync(string sid)
     {
-        if (!_config.SendCancelMessageToAptio) return;
+        if (!_config.SampleCleanup.SendCancelMessageToAptio) return;
         try
         {
-            using var client = new TcpClient();
-            await client.ConnectAsync(_aptio.Ip, _aptio.Port);
-            var stream = client.GetStream();
-            var cmd = $"ORDER {sid}||||||||||||C|||||{CR}{LF}";
-            var data = Encoding.ASCII.GetBytes(cmd);
-            await stream.WriteAsync(data);
+            if (!_aptioSocket.Connected)
+                await _aptioSocket.ConnectAsync();
+            // 取消整个样本（换行符由 AptioSocketClient 发送层统一追加，勿自带 CR/LF 以免双换行）
+            var cmd = $"ORDER {sid}||||||||||||C|||||";
+            await _aptioSocket.SendAsync(cmd);
             _logger.LogInformation("Cancel sent to Aptio for {Sid}", sid);
         }
         catch (Exception ex)
@@ -60,36 +65,41 @@ public class SampleCleanupService
         }
     }
 
-    private async Task InitDeleteSqlAsync()
+    // 构建删除模板：动态扫描 information_schema，自动纳入含 codsid/codoid 列的所有表
+    // 每 DeleteSqlRefreshInterval（默认 1 天）重建一次，自动适应数据库结构升级（新增表等）
+    private async Task InitDeleteSqlAsync(bool force = false)
     {
-        if (_deleteSqlTemplates != null) return;
+        if (_deleteSqlTemplates != null && !force
+            && DateTime.UtcNow - _deleteSqlBuiltAt < DeleteSqlRefreshInterval)
+            return;
 
-        var tables = await _db.GetTableColumnsAsync("codsid");
+        var sidTables = await _db.GetTableColumnsAsync("codsid");
+        var oidTables = await _db.GetTableColumnsAsync("codoid");
+
+        // 按精确表名合并（避免 orders 与 orders_details 之类的子串误判）
         var templates = new List<string>();
-        foreach (var t in tables)
-            templates.Add($"DELETE FROM {_config.DbName}.{t} WHERE codsid = '{{0}}'");
-
-        tables = await _db.GetTableColumnsAsync("codoid");
-        foreach (var t in tables)
+        var allTables = sidTables.Concat(oidTables).Distinct().OrderBy(t => t, StringComparer.Ordinal);
+        foreach (var t in allTables)
         {
-            if (!templates.Any(s => s.Contains(t)))
-                templates.Add($"DELETE FROM {_config.DbName}.{t} WHERE codoid = '{{1}}'");
-            else
-            {
-                var idx = templates.FindIndex(s => s.Contains(t));
-                templates[idx] = templates[idx].Replace("WHERE codsid = '{0}'",
-                    "WHERE codsid = '{0}' AND codoid = '{1}'");
-            }
+            var conds = new List<string>();
+            if (sidTables.Contains(t)) conds.Add("codsid = @sid");
+            if (oidTables.Contains(t)) conds.Add("codoid = @oid");
+            if (conds.Count == 0) continue;
+            templates.Add($"DELETE FROM {_config.DbName}.{t} WHERE {string.Join(" AND ", conds)}");
         }
 
+        var changed = _deleteSqlTemplates == null || _deleteSqlTemplates.Count != templates.Count;
         _deleteSqlTemplates = templates;
+        _deleteSqlBuiltAt = DateTime.UtcNow;
+        if (changed)
+            _logger.LogInformation("Delete SQL templates built for {Count} tables", templates.Count);
     }
 
     private async Task ProcessTriggeredDeletionAsync()
     {
-        if (string.IsNullOrEmpty(_config.TestTriggerSampleDeletion)) return;
+        if (string.IsNullOrEmpty(_config.SampleCleanup.TestTriggerSampleDeletion)) return;
 
-        var tests = _config.TestTriggerSampleDeletion.Split(';', StringSplitOptions.RemoveEmptyEntries);
+        var tests = _config.SampleCleanup.TestTriggerSampleDeletion.Split(';', StringSplitOptions.RemoveEmptyEntries);
         foreach (var test in tests)
         {
             var parts = test.Split(':');
@@ -97,28 +107,32 @@ public class SampleCleanupService
             var testName = parts[0];
             var timeoutMin = parts[1];
 
-            var sql = $"SELECT codsid, codoid FROM {_config.DbName}.reqtest " +
+            var sql = $"SELECT DISTINCT codsid FROM {_config.DbName}.reqtest " +
                       $"WHERE codtest = @TestName AND TIMESTAMPDIFF(MINUTE, datrequest, NOW()) > @Timeout";
             try
             {
                 using var conn = _db.NewConnection();
-                var rows = await conn.QueryAsync<(string codsid, string codoid)>(sql,
-                    new { TestName = testName, Timeout = int.Parse(timeoutMin) });
-                foreach (var row in rows)
+                var sids = (await conn.QueryAsync<string>(sql,
+                    new { TestName = testName, Timeout = int.Parse(timeoutMin) })).ToList();
+                if (sids.Count == 0) continue;
+
+                foreach (var sid in sids)
                 {
-                    var sid = row.codsid;
-                    var oid = row.codoid;
-                    if (!string.IsNullOrEmpty(sid))
-                    {
-                        await _db.DeleteSampleAsync(sid, oid ?? "", _deleteSqlTemplates!);
-                        await SendCancelToAptioAsync(sid);
-                        _logger.LogInformation("Trigger-deleted sample {Sid} for test {Test}", sid, testName);
-                    }
+                    if (string.IsNullOrEmpty(sid)) continue;
+                    // 先通过 sid 获取 oid（reqtube），再删除关联记录（含 orders）
+                    var oid = await _db.GetOidBySidAsync(sid);
+                    if (string.IsNullOrEmpty(oid))
+                        _logger.LogWarning("No oid found in reqtube for sample {Sid}, orders may not be deleted", sid);
+                    var affected = await _db.DeleteSampleAsync(sid, oid, _deleteSqlTemplates!);
+                    await SendCancelToAptioAsync(sid);
+                    _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test}, {Rows} row(s)",
+                        sid, oid, testName, affected);
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogWarning("Trigger deletion error for {Test}: {Msg}", testName, ex.Message);
+                _errors.Report("DmsCleanup", "ERROR", $"Trigger deletion error for {testName}: {ex.Message}");
             }
         }
     }

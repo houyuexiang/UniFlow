@@ -12,6 +12,7 @@
     <h1>UniFlow</h1>
     <span class="subtitle">实验室自动化工作流服务</span>
     <div class="header-right">
+      <span class="version-badge" id="appVersion">v?</span>
       <span class="status-badge" id="systemStatus">检查中...</span>
       <button onclick="refreshAll()" class="btn-icon" title="刷新">↻</button>
     </div>
@@ -53,6 +54,7 @@
           <option value="">全部</option><option value="ERROR">ERROR</option>
           <option value="FATAL">FATAL</option><option value="WARN">WARN</option>
         </select></label>
+        <button class="btn-danger" onclick="clearAllErrors()">清除所有错误</button>
       </div>
       <div class="error-summary" id="errorSummary"></div>
       <table class="data-table" id="errorTable">

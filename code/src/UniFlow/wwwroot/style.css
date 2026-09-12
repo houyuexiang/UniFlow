@@ -12,6 +12,7 @@ header { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-
 header h1 { font-size: 20px; font-weight: 700; color: var(--blue); }
 .subtitle { font-size: 12px; color: var(--text2); }
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.version-badge { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; background: var(--surface); color: var(--text2); border: 1px solid var(--border); }
 .status-badge { padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
 .status-badge.healthy { background: #166534; color: var(--green); }
 .status-badge.degraded { background: #713f12; color: var(--yellow); }
@@ -25,6 +26,8 @@ header h1 { font-size: 20px; font-weight: 700; color: var(--blue); }
 .tab-content.active { display: block; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.group-header { font-size: 13px; font-weight: 700; color: var(--blue); text-transform: uppercase; padding: 10px 0 2px; letter-spacing: 1px; margin-top: 6px; }
+.group-header:first-of-type { padding-top: 0; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .card .label { font-size: 11px; color: var(--text2); text-transform: uppercase; }
 .card .value { font-size: 24px; font-weight: 700; margin: 4px 0; }
@@ -63,6 +66,8 @@ header h1 { font-size: 20px; font-weight: 700; color: var(--blue); }
 .config-hint { font-size: 11px; color: var(--text2); }
 .btn { background: var(--blue); color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
 .btn:hover { opacity: 0.9; }
+.btn-danger { background: #d9534f; color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.btn-danger:hover { opacity: 0.85; }
 .btn-icon { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 18px; padding: 4px; }
 .btn-icon:hover { color: var(--text); }
 

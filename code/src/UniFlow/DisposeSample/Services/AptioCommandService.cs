@@ -17,7 +17,7 @@ public class AptioCommandService
     {
         var cmd = $"COMMENT S002^{barcode}\\TRASH^S";
         _logger.LogInformation("Dispose: {Cmd}", cmd);
-        var ack = await _socket.SendAndReceiveAsync(cmd, ct);
+        var ack = await _socket.SendAsync(cmd, ct);
         return ack?.StartsWith("ACK") == true;
     }
 
@@ -25,7 +25,7 @@ public class AptioCommandService
     {
         var cmd = $"COMMENT S002^{barcode}\\DELIVER^S";
         _logger.LogInformation("Deliver: {Cmd}", cmd);
-        var ack = await _socket.SendAndReceiveAsync(cmd, ct);
+        var ack = await _socket.SendAsync(cmd, ct);
         return ack?.StartsWith("ACK") == true;
     }
 
@@ -33,7 +33,7 @@ public class AptioCommandService
     {
         var cmd = $"COMMENT S010^{barcode}^S";
         _logger.LogInformation("Stat Priority: {Cmd}", cmd);
-        var ack = await _socket.SendAndReceiveAsync(cmd, ct);
+        var ack = await _socket.SendAsync(cmd, ct);
         return ack?.StartsWith("ACK") == true;
     }
 
@@ -41,12 +41,12 @@ public class AptioCommandService
     {
         var cmd = $"ORDER {barcode}||||||||||||C|||||{test}";
         _logger.LogInformation("Cancel Test: {Cmd}", cmd);
-        var ack = await _socket.SendAndReceiveAsync(cmd, ct);
+        var ack = await _socket.SendAsync(cmd, ct);
         return ack?.StartsWith("ACK") == true;
     }
 
     public async Task<string?> SendStatusRequestAsync(CancellationToken ct = default)
     {
-        return await _socket.SendAndReceiveAsync("STATUS-REQUEST 1", ct);
+        return await _socket.SendAsync("STATUS-REQUEST 1", ct);
     }
 }

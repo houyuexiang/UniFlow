@@ -21,7 +21,7 @@ public class PitStopMonitorService
 
     public async Task ExecuteAsync(CancellationToken ct = default)
     {
-        if (!_config.EnablePitStopMonitor) return;
+        if (!_config.PitStop.EnableMonitor) return;
 
         try
         {
@@ -54,11 +54,11 @@ public class PitStopMonitorService
                     else
                     {
                         var elapsed = now - _seen[table][id];
-                        if (elapsed.TotalMinutes > _config.PitStopTimeoutMinutes)
-                        {
-                            await _db.DeletePitstopRecordsAsync(table);
-                            _logger.LogWarning("PitStop stuck >{Timeout}m, cleaned table {Table}",
-                                _config.PitStopTimeoutMinutes, table);
+                        if (elapsed.TotalMinutes > _config.PitStop.TimeoutMinutes)
+                            {
+                                await _db.DeletePitstopRecordsAsync(table);
+                                _logger.LogWarning("PitStop stuck >{Timeout}m, cleaned table {Table}",
+                                    _config.PitStop.TimeoutMinutes, table);
                             _seen[table].Clear();
                             break;
                         }

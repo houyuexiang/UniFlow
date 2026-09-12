@@ -30,7 +30,8 @@ public class HealthCheckWorker : BackgroundService
             {
                 _logger.LogWarning("HealthCheck error: {Msg}", ex.Message);
             }
-            await Task.Delay(TimeSpan.FromSeconds(_config.HealthCheckIntervalSeconds), ct);
+            try { await Task.Delay(TimeSpan.FromSeconds(_config.HealthCheckIntervalSeconds), ct); }
+            catch (OperationCanceledException) { break; }
         }
     }
 }
