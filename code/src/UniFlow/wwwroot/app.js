@@ -1120,8 +1120,8 @@ async function restartService() {
   }, 1000);
 }
 
-async function restartProcess() {
-  if (!confirm('进程级重启：整个服务进程退出并由 systemd/服务管理器自动拉起（约 5 秒中断）。继续？')) return;
+async function restartProcess(skipConfirm = false) {
+  if (!skipConfirm && !confirm('进程级重启：整个服务进程退出并由 systemd/服务管理器自动拉起（约 5 秒中断）。继续？')) return;
   const hint = document.getElementById('formsHint') || null;
   if (hint) hint.textContent = '⏳ 进程退出中，请稍候…';
   try {
@@ -1143,20 +1143,40 @@ async function pollRestartBack(tries = 30) {
 }
 
 // ===== Update (online upgrade) =====
+// XHR 上传（fetch 无上传进度回调）
+function uploadUpdateWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/update/upload');
+    xhr.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.onload = () => resolve({ status: xhr.status, json: () => JSON.parse(xhr.responseText || '{}') });
+    xhr.send(file);
+  });
+}
+
 async function uploadUpdate(file) {
   if (!file) return;
-  if (!confirm(`确认上传升级包 ${file.name}？上传后需要点击「进程重启」生效。`)) return;
+  if (!confirm(`确认上传升级包 ${file.name}？上传后需要进程重启生效。`)) return;
   const hint = document.getElementById('formsHint');
+  hint.style.color = 'var(--blue, #3399ff)';
   hint.textContent = '⏳ 上传中...';
   try {
-    const resp = await fetch('/api/update/upload', { method: 'POST', body: file });
+    const resp = await uploadUpdateWithProgress(file, p => {
+      const pct = Math.round(p * 100);
+      hint.textContent = `⏳ 上传中... ${pct}%`;
+    });
+    hint.style.color = '';
     const r = await resp.json();
     if (!r.staged) { hint.textContent = '❌ ' + (r.error || '上传失败'); hint.style.color = 'var(--red, #d9534f)'; return; }
     hint.textContent = '📦 已暂存 (md5: ' + r.md5.slice(0, 8) + ')。正在应用...';
     const r2 = await (await fetch('/api/update/apply', { method: 'POST' })).json();
     if (r2.applied) {
-      hint.textContent = '✅ 升级已就绪 (' + r.md5.slice(0, 8) + ')。点「进程重启」完成升级。';
-      hint.style.color = '';
+      hint.textContent = '✅ 升级已就绪 (' + r.md5.slice(0, 8) + ')';
+      if (confirm('升级包已应用成功。\n\n需要执行「进程重启」以激活新版本（服务将自动拉起，约 5 秒中断）。\n\n现在立即执行？'))
+        restartProcess(true);
+      else
+        hint.textContent = '✅ 升级已就绪 (' + r.md5.slice(0, 8) + ')。点「进程重启」完成升级。';
     } else {
       hint.textContent = '❌ 应用失败: ' + (r2.error || 'unknown');
       hint.style.color = 'var(--red, #d9534f)';
