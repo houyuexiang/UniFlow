@@ -3,9 +3,11 @@ using UniFlow.Common.Services;
 
 namespace UniFlow.WebAdmin.Services;
 
+// 健康与错误存储。注意：连接非线程安全，且本类被外壳（API/收集器/健康检查）
+// 与业务 Worker（经由外壳单例注入）并发使用——因此每次操作使用独立连接。
 public class HealthStore : IDisposable
 {
-    private readonly SqliteConnection _conn;
+    private readonly string _connString;
     private readonly ILogger<HealthStore> _logger;
     private readonly int _retentionDays;
     private readonly ErrorReporter _reporter;
@@ -15,14 +17,21 @@ public class HealthStore : IDisposable
         _logger = logger;
         _retentionDays = retentionDays;
         _reporter = reporter ?? new ErrorReporter();
-        _conn = new SqliteConnection($"Data Source={dbPath}");
-        _conn.Open();
+        _connString = $"Data Source={dbPath}";
         InitDatabase();
+    }
+
+    private SqliteConnection Open()
+    {
+        var conn = new SqliteConnection(_connString);
+        conn.Open();
+        return conn;
     }
 
     private void InitDatabase()
     {
-        using var cmd = _conn.CreateCommand();
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS health_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +57,8 @@ public class HealthStore : IDisposable
     {
         try
         {
-            var cmd = _conn.CreateCommand();
+            using var conn = Open();
+            var cmd = conn.CreateCommand();
             cmd.CommandText = "INSERT INTO health_records (timestamp, module, status, message) VALUES (@ts, @m, @s, @msg)";
             cmd.Parameters.AddWithValue("@ts", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             cmd.Parameters.AddWithValue("@m", module);
@@ -74,7 +84,8 @@ public class HealthStore : IDisposable
     {
         try
         {
-            var cmd = _conn.CreateCommand();
+            using var conn = Open();
+            var cmd = conn.CreateCommand();
             cmd.CommandText = "INSERT INTO error_records (timestamp, module, level, message) VALUES (@ts, @m, @l, @msg)";
             cmd.Parameters.AddWithValue("@ts", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             cmd.Parameters.AddWithValue("@m", module);
@@ -96,7 +107,8 @@ public class HealthStore : IDisposable
         if (!string.IsNullOrEmpty(module)) sql += " AND module = @mod";
         sql += " ORDER BY timestamp DESC LIMIT 500";
 
-        var cmd = _conn.CreateCommand();
+        using var conn = Open();
+        var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.AddWithValue("@cut", cutoff);
         if (!string.IsNullOrEmpty(module)) cmd.Parameters.AddWithValue("@mod", module);
@@ -125,7 +137,8 @@ public class HealthStore : IDisposable
         if (!string.IsNullOrEmpty(level)) sql += " AND level = @lvl";
         sql += " ORDER BY timestamp DESC LIMIT 500";
 
-        var cmd = _conn.CreateCommand();
+        using var conn = Open();
+        var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.AddWithValue("@cut", cutoff);
         if (!string.IsNullOrEmpty(module)) cmd.Parameters.AddWithValue("@mod", module);
@@ -152,7 +165,8 @@ public class HealthStore : IDisposable
     public async Task<Dictionary<string, object>> GetLatestModuleStatusAsync()
     {
         var result = new Dictionary<string, object>();
-        var cmd = _conn.CreateCommand();
+        using var conn = Open();
+        var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT h1.module, h1.status, h1.timestamp, h1.message
             FROM health_records h1
@@ -195,16 +209,18 @@ public class HealthStore : IDisposable
     // 清空全部错误记录
     public async Task ClearErrorsAsync()
     {
-        var cmd = _conn.CreateCommand();
+        using var conn = Open();
+        var cmd = conn.CreateCommand();
         cmd.CommandText = "DELETE FROM error_records";
         await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task CleanupOldAsync()
     {
+        using var conn = Open();
         // 按时间清理（保留 _retentionDays 天）
         var cutoff = DateTime.Now.AddDays(-_retentionDays).ToString("yyyy-MM-dd HH:mm:ss");
-        var cmd = _conn.CreateCommand();
+        var cmd = conn.CreateCommand();
         cmd.CommandText = "DELETE FROM health_records WHERE timestamp < @cut";
         cmd.Parameters.AddWithValue("@cut", cutoff);
         await cmd.ExecuteNonQueryAsync();
@@ -220,12 +236,12 @@ public class HealthStore : IDisposable
             """;
         await cmd.ExecuteNonQueryAsync();
 
-        // 错误记录保留 7 天即可
-        cmd.CommandText = "DELETE FROM error_records WHERE timestamp < @cut7";
-        cmd.Parameters.AddWithValue("@cut7", DateTime.Now.AddDays(-7).ToString("yyyy-MM-dd HH:mm:ss"));
+        // 错误记录与 health_records 同保留期（_retentionDays 统一控制管理库记录保留）
+        //（@cut 仍绑定上面的 cutoff，直接复用）
+        cmd.CommandText = "DELETE FROM error_records WHERE timestamp < @cut";
         await cmd.ExecuteNonQueryAsync();
         cmd.Parameters.Clear();
     }
 
-    public void Dispose() => _conn.Dispose();
+    public void Dispose() { /* 连接按操作创建，无共享句柄 */ }
 }

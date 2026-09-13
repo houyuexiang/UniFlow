@@ -20,9 +20,10 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="dashboard">仪表盘</button>
+    <button class="tab" data-tab="forms">功能配置</button>
     <button class="tab" data-tab="errors">错误日志</button>
-    <button class="tab" data-tab="config">配置管理</button>
     <button class="tab" data-tab="logs">日志文件</button>
+    <button class="tab" data-tab="api">API 说明</button>
   </nav>
 
   <main>
@@ -41,6 +42,11 @@
         </div>
         <div class="chart" id="healthChart"><div class="loading">加载中...</div></div>
       </div>
+
+  <div class="page-restart-bar">
+    <button class="btn-danger" onclick="restartService()">重启服务</button>
+    <span class="config-hint">按最新配置重建全部任务（约 2-5 秒）</span>
+  </div>
     </section>
 
     <!-- Errors -->
@@ -61,16 +67,31 @@
         <thead><tr><th>时间</th><th>模块</th><th>级别</th><th>消息</th></tr></thead>
         <tbody id="errorBody"></tbody>
       </table>
+
+  <div class="page-restart-bar">
+    <button class="btn-danger" onclick="restartService()">重启服务</button>
+    <span class="config-hint">按最新配置重建全部任务（约 2-5 秒）</span>
+  </div>
     </section>
 
-    <!-- Config -->
-    <section id="tab-config" class="tab-content">
+    <!-- Forms: graphical configuration -->
+    <section id="tab-forms" class="tab-content">
       <div class="config-toolbar">
-        <button onclick="loadConfig()" class="btn">刷新配置</button>
-        <span class="config-hint">点击值可编辑</span>
+        <button onclick="saveAllForms()" class="btn">保存全部</button>
+        <button onclick="downloadConfig()" class="btn">下载配置文件</button>
+        <span class="config-hint" id="formsHint">带 ⓘ/? 的项保存后需重启服务生效</span>
+        <span class="config-version" id="configVersion"></span>
       </div>
-      <div id="configTree" class="config-tree"><div class="loading">加载中...</div></div>
+      <div id="formsBody"><div class="loading">加载中...</div></div>
+      <div class="restart-area">
+        <button class="btn-danger" id="restartBtn" onclick="restartService()">重启服务</button>
+        <button class="btn" onclick="restartProcess()" id="btnRestartProcess">进程重启</button>
+        <button class="btn" onclick="document.getElementById('updateFile').click()">上传新版本</button>
+        <input type="file" id="updateFile" accept=".zip" style="display:none" onchange="uploadUpdate(this.files[0])">
+        <span class="config-hint">重启服务=按最新配置重建业务任务（Web 不中断）；进程重启=进程退出并由服务管理器自动拉起（约 5 秒中断）</span>
+      </div>
     </section>
+
 
     <!-- Log Files -->
     <section id="tab-logs" class="tab-content">
@@ -79,12 +100,39 @@
           <option value="1">1天</option><option value="3" selected>3天</option>
           <option value="7">7天</option><option value="30">30天</option>
         </select></label>
+        <label>模块: <select id="logModule" onchange="loadLogFiles()">
+          <option value="">全部</option><option value="DisposeSample">DisposeSample</option>
+          <option value="Priority">Priority</option><option value="Delivery">Delivery</option>
+          <option value="TestNameDispose">TestNameDispose</option><option value="DeliveryFile">DeliveryFile</option>
+          <option value="SrmExport">SrmExport</option><option value="DmsCleanup">DmsCleanup</option>
+          <option value="DmsPitStop">DmsPitStop</option><option value="DmsStatusCorr">DmsStatusCorr</option>
+          <option value="DmsEmptyResultCleanup">DmsEmptyResultCleanup</option><option value="UniFlow_Error">错误日志</option>
+        </select></label>
+        <button class="btn" onclick="downloadLogBundle()">⬇ 打包下载（zip）</button>
       </div>
       <div id="logFileList" class="log-file-list"><div class="loading">加载中...</div></div>
       <div class="log-viewer" id="logViewer" style="display:none">
         <h4 id="logViewerTitle"></h4>
         <pre id="logContent"></pre>
       </div>
+
+  <div class="page-restart-bar">
+    <button class="btn-danger" onclick="restartService()">重启服务</button>
+    <span class="config-hint">按最新配置重建全部任务（约 2-5 秒）</span>
+  </div>
+    </section>
+    <!-- API Docs -->
+    <section id="tab-api" class="tab-content">
+      <div class="config-hint" style="margin-bottom:10px">所有接口均以 <b>/api</b> 为前缀（如 <b>http://服务器:5100/api/health</b>）。支持 GET 请求的接口可直接在浏览器打开。</div>
+      <table class="data-table" id="apiTable">
+        <thead><tr><th style="width:90px">方法</th><th style="width:280px">端点</th><th>说明</th><th style="width:300px">示例 / 参数</th><th style="width:220px">响应示例</th></tr></thead>
+        <tbody id="apiBody"></tbody>
+      </table>
+      <h3 style="margin:18px 0 8px;font-size:14px;color:var(--blue)">可配置项一览（功能配置页全部字段）</h3>
+      <table class="data-table" id="cfgFieldsTable">
+        <thead><tr><th>分组</th><th style="width:320px">配置路径</th><th>名称</th><th style="width:70px">类型</th><th style="width:120px">生效方式</th><th style="width:260px">示例值</th><th>说明</th></tr></thead>
+        <tbody id="cfgFieldsBody"></tbody>
+      </table>
     </section>
   </main>
 </div>

@@ -11,7 +11,7 @@ public class SrmExportWorker : BackgroundService
     private readonly Services.IExportDatabaseService _db;
     private readonly Services.IExportFileService _export;
     private readonly HealthStore _health;
-    private AptioConfig _aptio = default!;
+    private AptioConfig _aptio = new();
     private AptioSrmExportConfig _ec = new();
     private FeatureConfig _features = new();
     private bool _exportedToday;
@@ -39,9 +39,14 @@ public class SrmExportWorker : BackgroundService
             if (doc == null) return;
             if (doc.TryGetValue("Aptio", out var ap))
             {
-                try { _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new(); }
-                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, using defaults: {Raw}", ap.GetRawText()); _aptio = new(); }
-                _ec = _aptio.SrmExport;
+                // 解析失败保留上一次可用的配置（绝不静默回退出厂默认）
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText());
+                    if (parsed != null) _aptio = parsed;
+                }
+                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, keeping previous values: {Raw}", ap.GetRawText()); }
+                _ec = _aptio.SrmExport ?? new();   // SrmExport 属性可能为 null（或首启解析失败时 _aptio 未赋值）的防护
             }
             if (doc.TryGetValue("Features", out var fe))
             {

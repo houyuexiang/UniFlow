@@ -81,6 +81,7 @@ public class PriorityWorker : BackgroundService
                 await ProcessAsync(r, ct);
                 try { await _health.RecordHealthAsync("Priority", "healthy"); } catch { }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogWarning("Priority error: {Msg}", ex.Message);

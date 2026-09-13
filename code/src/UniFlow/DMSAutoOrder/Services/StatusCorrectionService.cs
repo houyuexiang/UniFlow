@@ -90,7 +90,7 @@ public class StatusCorrectionService
             }
 
             // Handle IgnoreFlagList
-            if (!string.IsNullOrEmpty(_config.StatusCorrection.IgnoreFlagList))
+            if (_config.StatusCorrection.GetIgnoreFlags().Length > 0)
                 await ProcessIgnoreFlagsAsync();
         }
         catch (Exception ex)
@@ -115,7 +115,7 @@ public class StatusCorrectionService
 
     private async Task ProcessIgnoreFlagsAsync()
     {
-        var ignoreFlags = _config.StatusCorrection.IgnoreFlagList.Split(',', StringSplitOptions.RemoveEmptyEntries);
+        var ignoreFlags = _config.StatusCorrection.GetIgnoreFlags();
         if (ignoreFlags.Length == 0) return;
 
         var sql = $"SELECT codsid, codtest, jsnflaginstrument FROM {_config.DbName}.reqtestresult " +

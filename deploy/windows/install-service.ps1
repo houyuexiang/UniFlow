@@ -30,6 +30,8 @@ switch ($Action) {
         }
         New-Service -Name $ServiceName -DisplayName $DisplayName `
             -BinaryPathName "$exePath --contentRoot $exePath" -StartupType Automatic
+        # 自动重启策略：故障后 60s 内重启（1st/2nd/3rd），计数器每日重置
+        sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000
         Start-Service $ServiceName
         $s = Get-Service $ServiceName
         Write-Host "Service: $($s.Status)" -ForegroundColor Green

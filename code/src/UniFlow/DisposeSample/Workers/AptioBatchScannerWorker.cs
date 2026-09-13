@@ -14,6 +14,7 @@ public class AptioBatchScannerWorker : BackgroundService
     private readonly HealthStore _health;
     private readonly IOptionsMonitor<FeatureConfig> _features;
     private bool _pauseReported;
+    private int _lastScanCount = -1;
 
     public AptioBatchScannerWorker(
         ILogger<AptioBatchScannerWorker> logger,
@@ -78,8 +79,10 @@ public class AptioBatchScannerWorker : BackgroundService
         }
 
         var samples = await _db.GetAllScanableSamplesAsync(_aptio.BatchScan.MaxOnetimeScanCount, candidates);
-        if (samples.Count > 0)
+        // 循环降噪：候选数量变化时才记录
+        if (samples.Count > 0 && samples.Count != _lastScanCount)
             _logger.LogInformation("Scan found {Count} candidate samples", samples.Count);
+        _lastScanCount = samples.Count;
 
         // 总是分发：空结果也会触发 Router 清理已处理任务的去重记录；
         // 单轮推送上限由 Router 内部按 MaxOnetimeScanCount 控制

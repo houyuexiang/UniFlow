@@ -81,6 +81,7 @@ public class DeliveryWorker : BackgroundService
                 await ProcessAsync(r, ct);
                 try { await _health.RecordHealthAsync("Delivery", "healthy"); } catch { }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogWarning("Delivery error: {Msg}", ex.Message);

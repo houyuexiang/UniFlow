@@ -6,12 +6,14 @@ public class HealthCheckWorker : BackgroundService
 {
     private readonly HealthStore _health;
     private readonly Common.Models.WebAdminConfig _config;
+    private readonly RestartManager _restart;
     private readonly ILogger<HealthCheckWorker> _logger;
 
-    public HealthCheckWorker(HealthStore health, Common.Models.WebAdminConfig config, ILogger<HealthCheckWorker> logger)
+    public HealthCheckWorker(HealthStore health, Common.Models.WebAdminConfig config, RestartManager restart, ILogger<HealthCheckWorker> logger)
     {
         _health = health;
         _config = config;
+        _restart = restart;
         _logger = logger;
     }
 
@@ -23,7 +25,11 @@ public class HealthCheckWorker : BackgroundService
         {
             try
             {
-                await _health.RecordHealthAsync("System", "healthy", "All modules running");
+                // 业务宿主死亡（如重启失败）时如实上报，避免仪表盘假显示"正常"
+                if (!_restart.IsReady)
+                    await _health.RecordHealthAsync("System", "degraded", "Business host not running");
+                else
+                    await _health.RecordHealthAsync("System", "healthy", "All modules running");
                 await _health.CleanupOldAsync();
             }
             catch (Exception ex)

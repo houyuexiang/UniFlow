@@ -17,9 +17,39 @@ internal static class LogHelper
         _ => "LOG"
     };
 
+    // 类名级日志模块映射：每个功能一个独立文件，文件名与仪表盘健康卡片名一致
+    //（仪表盘哪个模块异常 → 直接打开同名日志排查）
+    private static readonly Dictionary<string, string> ModuleMap = new(StringComparer.Ordinal)
+    {
+        // —— Aptio 侧 ——
+        ["DisposeSampleWorker"] = "DisposeSample", ["DisposeDatabaseService"] = "DisposeSample",
+        ["PriorityWorker"] = "Priority", ["DeliveryWorker"] = "Delivery",
+        ["DeliveryFileWorker"] = "DeliveryFile", ["TestNameDisposeWorker"] = "TestNameDispose",
+        ["AptioBatchScannerWorker"] = "AptioBatchScanner",
+        ["AptioSocketClient"] = "Common", ["AptioCommandService"] = "Common",
+        ["AptioTaskRouter"] = "Common", ["SrmStatusDecoder"] = "Common", ["UniFlowFileLogger"] = "Common",
+        ["ExportDatabaseService"] = "SrmExport", ["ExportFileService"] = "SrmExport", ["SrmExportWorker"] = "SrmExport",
+        // —— DMS 侧 ——
+        ["DmsPitStopWorker"] = "DmsPitStop", ["PitStopMonitorService"] = "DmsPitStop",
+        ["DmsStatusCorrectionWorker"] = "DmsStatusCorr", ["StatusCorrectionService"] = "DmsStatusCorr",
+        ["DmsSampleCleanupWorker"] = "DmsCleanup", ["SampleCleanupService"] = "DmsCleanup",
+        ["DmsEmptyResultCleanupWorker"] = "DmsEmptyResultCleanup", ["EmptyResultCleanupService"] = "DmsEmptyResultCleanup",
+        ["DmsDatabaseService"] = "DmsCleanup",   // 共享 DB 服务归主用途（工单删除）
+        // —— WorkListCleaner ——
+        ["WorkListCleanerWorker"] = "WorkListCleaner", ["ImmuliteCleaner"] = "WorkListCleaner",
+        ["AccessDatabaseService"] = "WorkListCleaner", ["AccessAgentClient"] = "WorkListCleaner", ["CentralinkService"] = "WorkListCleaner",
+        // —— WebAdmin / 框架 ——
+        ["ErrorCollectorWorker"] = "WebAdmin", ["HealthCheckWorker"] = "WebAdmin",
+        ["HealthStore"] = "WebAdmin", ["ConfigService"] = "WebAdmin", ["RestartManager"] = "WebAdmin",
+    };
+
     public static string ModuleName(string category)
     {
         var parts = category.Split('.');
+        var last = parts[^1];
+        // 类名级精确映射优先
+        if (ModuleMap.TryGetValue(last, out var mapped)) return mapped;
+        // 兜底：命名空间级回退（未映射的新类自动归组）
         foreach (var p in parts)
         {
             if (p is "UniFlow" or "Services" or "Workers" or "Models") continue;
@@ -83,6 +113,7 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
     private readonly string _baseDir;
     private readonly int _maxFileSizeBytes;
     private readonly int _retentionDays;
+    private readonly bool _enabled;
     private readonly Timer _cleanupTimer;
     private readonly object _lock = new();
 
@@ -90,6 +121,7 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
 
     public UniFlowFileLoggerProvider(UniFlowLoggerConfig config)
     {
+        _enabled = config.FileLoggingEnabled;
         _baseDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, config.LogDirectory);
         Directory.CreateDirectory(_baseDir);
         _maxFileSizeBytes = config.MaxFileSizeMb * 1024 * 1024;
@@ -107,7 +139,8 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
     }
 
     public ILogger CreateLogger(string categoryName) =>
-        _loggers.GetOrAdd(categoryName, name => new UniFlowFileLogger(name, this));
+        !_enabled ? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
+                  : _loggers.GetOrAdd(categoryName, name => new UniFlowFileLogger(name, this));
 
     public void WriteModuleLog(string module, string line)
     {

@@ -97,15 +97,15 @@ public class SampleCleanupService
 
     private async Task ProcessTriggeredDeletionAsync()
     {
-        if (string.IsNullOrEmpty(_config.SampleCleanup.TestTriggerSampleDeletion)) return;
+        // 闸门用统一入口（新 JSON 格式 TriggerRules 优先，旧分号串兜底），
+        // 不能只判旧字段 TestTriggerSampleDeletion——表单保存只写新格式
+        var rules = _config.SampleCleanup.GetRules();
+        if (rules.Count == 0) return;
 
-        var tests = _config.SampleCleanup.TestTriggerSampleDeletion.Split(';', StringSplitOptions.RemoveEmptyEntries);
-        foreach (var test in tests)
+        foreach (var rule in rules)
         {
-            var parts = test.Split(':');
-            if (parts.Length < 2) continue;
-            var testName = parts[0];
-            var timeoutMin = parts[1];
+            var testName = rule.TestName;
+            var timeoutMin = rule.TimeoutMinutes;
 
             var sql = $"SELECT DISTINCT codsid FROM {_config.DbName}.reqtest " +
                       $"WHERE codtest = @TestName AND TIMESTAMPDIFF(MINUTE, datrequest, NOW()) > @Timeout";
@@ -113,7 +113,7 @@ public class SampleCleanupService
             {
                 using var conn = _db.NewConnection();
                 var sids = (await conn.QueryAsync<string>(sql,
-                    new { TestName = testName, Timeout = int.Parse(timeoutMin) })).ToList();
+                    new { TestName = testName, Timeout = timeoutMin })).ToList();
                 if (sids.Count == 0) continue;
 
                 foreach (var sid in sids)

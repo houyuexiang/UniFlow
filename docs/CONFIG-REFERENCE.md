@@ -200,17 +200,19 @@
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `PitStop.EnableMonitor` | bool | `false` | 是否启用 PitStop 监控 |
-| `PitStop.TimeoutMinutes` | int | `1` | PitStop 超时判定(分钟) |
+| `PitStop.TimeoutMinutes` | int | `1` | PitStop 超时判定(分钟)；监控启停由功能开关 `Features.Dms.PitStopMonitor` 控制 |
 
 ### DMS.StatusCorrection（状态修正，对应 `Features.Dms.StatusCorrection`）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `StatusCorrection.AutoModifyTestStatus` | string | `1` | 修正模式：1=不修正，2=同步，3=强制F |
-| `StatusCorrection.IgnoreFlagList` | string | `` | 忽略标志列表（逗号分隔） |
+| `StatusCorrection.IgnoreFlags` | JSON 数组 | `null` | 忽略标志列表（仪器结果报告这些标志时自动置 V）；**新格式（表单保存写这里）** |
+| `StatusCorrection.IgnoreFlagList` | string | `` | 忽略标志列表（旧格式，逗号分隔）；仅在 `IgnoreFlags` 为 null 时使用（兼容） |
 
 > 注：清理 `reqtestresult` 中的错误/空结果（`flgstatus` E/R/P 或 `valresult1` 空）已独立为 `DMS.EmptyResultCleanup` 功能，不再随状态修正执行。
+
+> **复合值 JSON 化说明**（v1.0.6.0）：多值配置已改用 JSON 结构（表单保存写新格式）；旧字符串格式仍兼容（新键为 null 时才使用旧值）。PUT /api/config 校验将持续执行（类型/键不匹配返回 400 + 英文错误）。
 
 ### DMS.EmptyResultCleanup（空结果清理，对应 `Features.Dms.EmptyResultCleanup`）
 
@@ -223,10 +225,32 @@
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `SampleCleanup.TestTriggerSampleDeletion` | string | `` | 触发样本删除的测试名（`测试名:超时分钟;`） |
-| `SampleCleanup.SendCancelMessageToAptio` | bool | `false` | 删除样本时是否发送取消消息到 Aptio（取消整个样本） |
+| `SampleCleanup.TriggerRules` | JSON 数组 | `null` | 工单删除规则；**新格式（表单保存写这里）**；示例：`[{"TestName":"RMSMP","TimeoutMinutes":1}]`；超时 0=到期即删 |
+| `SampleCleanup.TestTriggerSampleDeletion` | string | `` | 触发样本删除的测试名（旧格式，`测试名:超时分钟;`）；仅在 `TriggerRules` 为 null 时使用（兼容） |
+| `SampleCleanup.SendCancelMessageToAptio` | bool | `false` | 删除样本时是否发送取消消息到 Aptio（`ORDER…C` 取消整个样本的待处理测试） |
 
-> 删除表列表由程序动态扫描 `information_schema`（含 `codsid`/`codoid` 列的表）自动生成，无需配置。
+> 删除表列表由程序动态扫描 `information_schema`（含 `codsid`/`codoid` 列的表）自动生成，无需配置（每天重建模板）。
+
+---
+
+## Web 管理 API
+
+所有的 Web 管理与远程集成以 HTTP API 交互（均在 **/api** 前缀下），支持 GET 的接口可浏览器直接打开，效果同功能配置页标注。
+
+### 配置路径约定
+
+- **层级分隔符只认 `:`**（.NET 配置约定），`"."` 属于键名的一部分（如 `Logging:LogLevel:Microsoft.Hosting.Lifetime`）
+- 示例：`Features:Aptio:DisposeSample`、`DMS:SampleCleanup:TriggerRules`
+
+### PUT /api/config 的校验
+
+值与配置属性类型不匹配或 path 未知时，返回 **HTTP 400 + 英文原因**（如 `Value must be a boolean (true/false)`）。
+校验通过后值将**规范化**（`"true"`→`true`、`"3306"`→`3306`）后落盘。响应的 `restart.level` 指示生效方式：Hot=保存即生效 / InnerRestart=点页面「重启服务」按钮 / ProcessRestart=需操作系统级重启进程。
+
+### 可配置项一览
+
+通过 Web 界面「API 说明」页查看最新的 51 项可配置项列表（含分组、路径、类型、生效方式、示例值、说明），
+是与源码模型 `[Restart]` 特性同步维护的，未来新增配置会一并更新。
 
 ---
 

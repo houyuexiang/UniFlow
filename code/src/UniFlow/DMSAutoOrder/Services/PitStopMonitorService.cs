@@ -19,10 +19,11 @@ public class PitStopMonitorService
         _config = config;
     }
 
+    // 说明：是否启用由功能开关（Features.Dms.PitStopMonitor）决定——
+    // 该开关控制 DmsPitStopWorker 是否注册；Worker 运行即执行监控。
+    //（原 PitStop.EnableMonitor 为旧版单 Worker 时代的双层开关遗留，已废弃）
     public async Task ExecuteAsync(CancellationToken ct = default)
     {
-        if (!_config.PitStop.EnableMonitor) return;
-
         try
         {
             var tables = await _db.GetPitStopTablesAsync();
@@ -56,9 +57,12 @@ public class PitStopMonitorService
                         var elapsed = now - _seen[table][id];
                         if (elapsed.TotalMinutes > _config.PitStop.TimeoutMinutes)
                             {
+                                // 变更追溯：记录被清理的任务明细
+                                var detail = records.Select(r => r.GetValueOrDefault("idpitstop", "")?.ToString() ?? "")
+                                    .Where(x => x != "").ToList();
                                 await _db.DeletePitstopRecordsAsync(table);
-                                _logger.LogWarning("PitStop stuck >{Timeout}m, cleaned table {Table}",
-                                    _config.PitStop.TimeoutMinutes, table);
+                                _logger.LogWarning("PitStop stuck >{Timeout}m, cleaned table {Table}, ids=[{Ids}]",
+                                    _config.PitStop.TimeoutMinutes, table, string.Join(",", detail));
                             _seen[table].Clear();
                             break;
                         }

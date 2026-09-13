@@ -15,8 +15,8 @@ public class DisposeSampleWorker : BackgroundService
     private readonly AptioCommandService _commands;
     private readonly SrmStatusDecoder _statusDecoder;
     private readonly HealthStore _health;
-    private FeatureConfig _features;
-    private AptioConfig _aptio = default!;
+    private FeatureConfig _features = new();
+    private AptioConfig _aptio = new();
     private AptioDisposeSampleConfig _dc = new();
     private HashSet<int> _runDays = new();
     private List<TimeRange> _timeRanges = new();
@@ -25,6 +25,7 @@ public class DisposeSampleWorker : BackgroundService
     private string? _preBarcode;
     private int _connectRetries;
     private bool _pauseReported;
+    private string _lastCountSig = "";
 
     public DisposeSampleWorker(
         ILogger<DisposeSampleWorker> logger,
@@ -53,15 +54,19 @@ public class DisposeSampleWorker : BackgroundService
             if (doc.TryGetValue("Features", out var fe)) _features = JsonSerializer.Deserialize<FeatureConfig>(fe.GetRawText()) ?? new();
             if (doc.TryGetValue("Aptio", out var ap))
             {
-                try { _aptio = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText()) ?? new(); }
-                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, using defaults: {Raw}", ap.GetRawText()); _aptio = new(); }
-                _dc = _aptio.DisposeSample;
+                // 解析失败保留上一次可用的配置（绝不静默回退出厂默认）
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText());
+                    if (parsed != null) _aptio = parsed;
+                }
+                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, keeping previous values: {Raw}", ap.GetRawText()); }
+                _dc = _aptio.DisposeSample ?? new();
             }
-            _runDays = WorkTimeChecker.ParseRunDays(_dc.DiscardRunDate);
-            _timeRanges = WorkTimeChecker.ParseTimeRanges(_dc.DiscardTimeRange);
-            _allowErrors = new HashSet<string>(
-                _dc.AllowSrmErrorCode.Split(',', StringSplitOptions.TrimEntries)
-                    .Where(c => !string.IsNullOrEmpty(c)));
+            // 统一入口：新 JSON 格式（RunDays/TimeRanges/AllowedSrmErrorCodes）优先，旧串兜底
+            _runDays = _dc.GetRunDays();
+            _timeRanges = _dc.GetTimeRanges();
+            _allowErrors = _dc.GetAllowedErrors();
         }
         catch (Exception ex)
         {
@@ -167,13 +172,21 @@ public class DisposeSampleWorker : BackgroundService
         await _db.DeleteHistoryAsync();
 
         var totalCount = 0;
+        var snapshot = new List<string>();
         foreach (var nodeId in _aptio.SrmNodeIds)
         {
             var count = await _db.CheckSrmSampleCountAsync(nodeId);
             totalCount += count;
-            _logger.LogInformation("Node {Node} count={Count}", nodeId, count);
+            snapshot.Add($"{nodeId}={count}");
         }
-        _logger.LogInformation("Total count={Count}, threshold={Threshold}", totalCount, threshold);
+        // 循环降噪：仅数量变化时记录（巡检重复不打）
+        var sig = string.Join(",", snapshot) + $";T={totalCount}";
+        if (sig != _lastCountSig)
+        {
+            _logger.LogInformation("Node counts [{Snapshot}], total={Total}, threshold={Threshold}",
+                string.Join(",", snapshot), totalCount, threshold);
+            _lastCountSig = sig;
+        }
 
         if (totalCount <= threshold) return;
 

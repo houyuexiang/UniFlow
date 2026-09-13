@@ -81,6 +81,7 @@ public class TestNameDisposeWorker : BackgroundService
                 await ProcessAsync(r, ct);
                 try { await _health.RecordHealthAsync("TestNameDispose", "healthy"); } catch { }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogWarning("TestNameDispose error: {Msg}", ex.Message);

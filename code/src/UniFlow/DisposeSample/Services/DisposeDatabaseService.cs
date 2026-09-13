@@ -83,7 +83,7 @@ public class DisposeDatabaseService : IDisposeDatabaseService
         var count = await conn.QuerySingleAsync<int>(
             "SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE @Loc",
             new { Loc = location });
-        _logger.LogInformation("SRM sample count: {Count}", count);
+        _logger.LogDebug("SRM sample count: {Count}", count);
         return count;
     }
 
