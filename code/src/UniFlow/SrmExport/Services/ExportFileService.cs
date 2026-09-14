@@ -26,9 +26,10 @@ public class ExportFileService : IExportFileService
         var path = Path.Combine(dir, $"Dispose_{ts}_{samples.Count}.txt");
 
         var sb = new StringBuilder();
-        sb.AppendLine("Barcode\tDispose time");
+        // 原始版（Delphi/Windows）产物为 CRLF 行尾，固定写出以保证跨平台一致
+        sb.Append("Barcode\tDispose time\r\n");
         foreach (var s in samples)
-            sb.AppendLine($"{s.Barcode}\t{s.UpdateTime}");
+            sb.Append($"{s.Barcode}\t{s.UpdateTime}\r\n");
 
         await File.WriteAllTextAsync(path, sb.ToString(), Encoding.UTF8);
         _logger.LogInformation("Exported {Count} samples to {Path}", samples.Count, path);
