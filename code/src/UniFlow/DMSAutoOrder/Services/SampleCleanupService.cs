@@ -47,22 +47,39 @@ public class SampleCleanupService
         }
     }
 
-    private async Task SendCancelToAptioAsync(string sid)
+    // 发送取消报文：用删除前取得的测试名拼完整 ORDER 取消帧。
+    // 字段布局（DCAU 手册 ORDER 帧）：Action-Code=C 在索引12，Test-Request-i 从索引17起。
+    // 报文: ORDER {sid}|...|C|{test1}|{test2}...
+    private async Task SendCancelToAptioAsync(string sid, List<string> tests)
     {
         if (!_config.SampleCleanup.SendCancelMessageToAptio) return;
         try
         {
+            var cmd = BuildCancelCommand(sid, tests);
             if (!_aptioSocket.Connected)
                 await _aptioSocket.ConnectAsync();
-            // 取消整个样本（换行符由 AptioSocketClient 发送层统一追加，勿自带 CR/LF 以免双换行）
-            var cmd = $"ORDER {sid}||||||||||||C|||||";
+            // 换行符由 AptioSocketClient 发送层统一追加，勿自带 CR/LF 以免双换行
             await _aptioSocket.SendAsync(cmd);
-            _logger.LogInformation("Cancel sent to Aptio for {Sid}", sid);
+            _logger.LogInformation("Cancel sent to Aptio for {Sid}: {Cmd}", sid, cmd);
         }
         catch (Exception ex)
         {
             _logger.LogWarning("Cancel to Aptio failed for {Sid}: {Msg}", sid, ex.Message);
         }
+    }
+
+    // 拼 ORDER 取消帧：C 在索引12，索引13-16 空，Test-Request-1 从索引17起；
+    // 多个测试名在同一字段内用 ^ 连接（手册 Test-Request-i = tci^tni^tti）
+    internal static string BuildCancelCommand(string sid, IReadOnlyCollection<string> tests)
+    {
+        var sb = new StringBuilder();
+        sb.Append("ORDER ").Append(sid);
+        for (var i = 0; i < 12; i++) sb.Append('|');   // 索引1-12 占位，到 Action-Code
+        sb.Append('|').Append('C');                    // 索引12 = Action-Code
+        for (var i = 0; i < 4; i++) sb.Append('|');    // 索引13-16 空（Sample-Source 等）
+        if (tests.Count > 0)
+            sb.Append('|').Append(string.Join("^", tests));  // 索引17 = Test-Request-1
+        return sb.ToString();
     }
 
     // 构建删除模板：动态扫描 information_schema，自动纳入含 codsid/codoid 列的所有表
@@ -123,8 +140,10 @@ public class SampleCleanupService
                     var oid = await _db.GetOidBySidAsync(sid);
                     if (string.IsNullOrEmpty(oid))
                         _logger.LogWarning("No oid found in reqtube for sample {Sid}, orders may not be deleted", sid);
+                    // 先取测试名（reqtest 删除后就查不到了），用于拼取消报文
+                    var tests = await _db.GetTestsBySidAsync(sid);
                     var affected = await _db.DeleteSampleAsync(sid, oid, _deleteSqlTemplates!);
-                    await SendCancelToAptioAsync(sid);
+                    await SendCancelToAptioAsync(sid, tests);
                     _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test}, {Rows} row(s)",
                         sid, oid, testName, affected);
                 }

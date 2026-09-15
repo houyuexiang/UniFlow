@@ -140,4 +140,15 @@ public class DmsDatabaseService
             new { Sid = sid });
         return oid ?? "";
     }
+
+    // 取某样本在 reqtest 中的全部测试名（去重、非空），用于拼取消报文
+    public async Task<List<string>> GetTestsBySidAsync(string sid)
+    {
+        using var conn = NewConnection();
+        var tests = await conn.QueryAsync<string>(
+            $"SELECT DISTINCT codtest FROM {_config.DbName}.reqtest " +
+            $"WHERE codsid = @Sid AND codtest IS NOT NULL AND codtest <> ''",
+            new { Sid = sid });
+        return tests?.Distinct().Where(t => !string.IsNullOrWhiteSpace(t)).ToList() ?? new List<string>();
+    }
 }

@@ -194,7 +194,10 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
 
     private void OpenFile(LogFileState state, string path)
     {
-        state.Writer = new StreamWriter(path, true, Encoding.UTF8) { AutoFlush = true };
+        // FileShare.ReadWrite：允许下载/打包端点同时读取日志文件，避免 Windows 上共享冲突
+        state.Writer = new StreamWriter(
+            new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite),
+            Encoding.UTF8) { AutoFlush = true };
     }
 
     private static void CloseWriter(LogFileState state)

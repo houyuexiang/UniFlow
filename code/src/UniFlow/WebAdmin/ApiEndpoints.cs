@@ -263,7 +263,17 @@ public static class ApiEndpoints
                 && !full.Equals(Path.GetFullPath(logDir), StringComparison.OrdinalIgnoreCase))
                 return Results.Problem("Invalid log path", statusCode: 400);
             if (!File.Exists(full)) return Results.NotFound();
-            return Results.File(File.ReadAllBytes(full), "application/octet-stream", Path.GetFileName(full));
+            try
+            {
+                // 日志文件可能正被文件日志 StreamWriter 占用（Windows 尤其常见），
+                // 用 FileShare.ReadWrite 流式读取，避免共享冲突导致 500
+                var stream = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                return Results.File(stream, "application/octet-stream", Path.GetFileName(full));
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem($"Failed to read log file: {ex.Message}", statusCode: 500);
+            }
         });
 
         // 打包下载：按天数筛选（可选按模块过滤）的全部日志（zip）
@@ -281,16 +291,28 @@ public static class ApiEndpoints
             if (files.Count == 0) return Results.NotFound("no matching logs");
 
             var zipName = $"UniFlow-logs-{(string.IsNullOrEmpty(module) ? "all" : module)}-{DateTime.Now:yyyyMMddHHmmss}.zip";
-            using var ms = new MemoryStream();
-            using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
+            try
             {
-                foreach (var f in files)
+                using var ms = new MemoryStream();
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
                 {
-                    var rel = Path.GetRelativePath(logDir, f.FullName).Replace('\\', '/');
-                    zip.CreateEntryFromFile(f.FullName, rel, System.IO.Compression.CompressionLevel.Optimal);
+                    foreach (var f in files)
+                    {
+                        var rel = Path.GetRelativePath(logDir, f.FullName).Replace('\\', '/');
+                        // 日志文件可能正被文件日志 StreamWriter 占用（Windows 尤其常见），
+                        // 用 FileShare.ReadWrite 读取，避免共享冲突导致 500
+                        using var fs = new FileStream(f.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        var entry = zip.CreateEntry(rel, System.IO.Compression.CompressionLevel.Optimal);
+                        using var es = entry.Open();
+                        fs.CopyTo(es);
+                    }
                 }
+                return Results.File(ms.ToArray(), "application/zip", zipName);
             }
-            return Results.File(ms.ToArray(), "application/zip", zipName);
+            catch (Exception ex)
+            {
+                return Results.Problem($"Failed to bundle logs: {ex.Message}", statusCode: 500);
+            }
         });
 
         // ===== Update =====
