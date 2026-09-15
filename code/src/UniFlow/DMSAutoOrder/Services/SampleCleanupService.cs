@@ -68,18 +68,19 @@ public class SampleCleanupService
         }
     }
 
-    // 拼 ORDER 取消帧：C 在索引12，索引13-16 空，Test-Request-1 从索引17起；
-    // 多个测试名在同一字段内用 ^ 连接（手册 Test-Request-i = tci^tni^tti）
+    // 拼 ORDER 取消帧（DCAU 手册 ORDER 帧字段布局）：
+    //   index 0  = Sample ID
+    //   index 12 = Action-Code = C
+    //   index 13-16 = Sample-Source 等（取消时留空）
+    //   index 17 = Test-Request-1（多个测试名在同一字段内用 ^ 连接，tci^tni^tti）
     internal static string BuildCancelCommand(string sid, IReadOnlyCollection<string> tests)
     {
-        var sb = new StringBuilder();
-        sb.Append("ORDER ").Append(sid);
-        for (var i = 0; i < 12; i++) sb.Append('|');   // 索引1-12 占位，到 Action-Code
-        sb.Append('|').Append('C');                    // 索引12 = Action-Code
-        for (var i = 0; i < 4; i++) sb.Append('|');    // 索引13-16 空（Sample-Source 等）
-        if (tests.Count > 0)
-            sb.Append('|').Append(string.Join("^", tests));  // 索引17 = Test-Request-1
-        return sb.ToString();
+        var fields = new List<string>(18) { "ORDER " + sid };   // index 0
+        for (var i = 1; i <= 11; i++) fields.Add("");            // index 1-11 空
+        fields.Add("C");                                          // index 12 = Action-Code
+        for (var i = 13; i <= 16; i++) fields.Add("");            // index 13-16 空
+        fields.Add(string.Join("^", tests));                      // index 17 = Test-Request-1
+        return string.Join("|", fields);
     }
 
     // 构建删除模板：动态扫描 information_schema，自动纳入含 codsid/codoid 列的所有表
