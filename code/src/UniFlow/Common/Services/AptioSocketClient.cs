@@ -45,6 +45,8 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
     private const int SendRetryCount = 3;
     // 空闲超过该时长即视为可能"半开"连接，发送前主动重建（避免写已断连接撞 WSAECONNABORTED）
     private static readonly TimeSpan IdleReconnectThreshold = TimeSpan.FromSeconds(30);
+    // fire-and-forget：写入后只在此窗口内尽力等一行回复（Aptio 通常不回包），超时即视为已投递
+    private static readonly TimeSpan ResponseWaitTimeout = TimeSpan.FromSeconds(1);
     private DateTime _lastActivityUtc = DateTime.UtcNow;
 
     // 重试梯度：3s×10 → 30s×10 → 60s
@@ -219,6 +221,7 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
                     throw new InvalidOperationException("Not connected after idle refresh");
             }
 
+            // 发送（Aptio 协议为 fire-and-forget：成功=写入对端，不等待 ACK）
             try
             {
                 await _writer!.WriteAsync(command.AsMemory(), ct);
@@ -226,25 +229,54 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
                 await _writer!.FlushAsync(ct);
                 _lastActivityUtc = DateTime.UtcNow;
                 _logger.LogDebug(">> {Cmd}", Sanitize(command));
-                var response = await _reader!.ReadLineAsync(ct);
-                _lastActivityUtc = DateTime.UtcNow;
-                if (response != null)
-                    _logger.LogDebug("<< {Resp}", Sanitize(response));
-                return response;
             }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException || ex is OperationCanceledException)
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
             {
-                // 方案1：发送/读取失败 → 断开重连 → 原命令重发（最多 SendRetryCount 次）
-                if (ct.IsCancellationRequested) throw;
+                // 方案1：仅发送（写入）失败 → 断开重连 → 原命令重发（最多 SendRetryCount 次）
                 lastError = ex;
                 _logger.LogWarning("Aptio send failed (attempt {Attempt}/{Max}): {Msg} — reconnecting and retrying",
                     attempt + 1, SendRetryCount + 1, ex.Message);
                 DisconnectInternal();
                 try { await Task.Delay(TimeSpan.FromMilliseconds(500), ct); }
                 catch (OperationCanceledException) { throw; }
+                continue;
             }
+
+            // 命令已成功写入。Aptio 通常不回复（异步推送模型），
+            // 尽力在极短窗口内读一行：有则返回（如 STATUS 类），无则视为成功（fire-and-forget）。
+            return await TryReadResponseAsync(ct);
         }
         throw new InvalidOperationException($"Aptio send failed after {SendRetryCount + 1} attempts: {lastError?.Message}", lastError);
+    }
+
+    // 尽力读一行响应；Aptio 不回包时在超时窗口后返回 null（不算失败，不触发重试）
+    private async Task<string?> TryReadResponseAsync(CancellationToken ct)
+    {
+        if (_reader == null) return null;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(ResponseWaitTimeout);
+            var response = await _reader.ReadLineAsync(timeout.Token);
+            _lastActivityUtc = DateTime.UtcNow;
+            if (response != null)
+                _logger.LogDebug("<< {Resp}", Sanitize(response));
+            return response;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // 无响应 = 正常（Aptio fire-and-forget）
+            return null;
+        }
+        catch (IOException)
+        {
+            // 连接被对端关闭/读超时：命令已写入，按已投递处理，交给下次发送时重连
+            return null;
+        }
+        catch (ObjectDisposedException)
+        {
+            return null;
+        }
     }
 
     private async Task ConnectCoreAsync(CancellationToken ct)
