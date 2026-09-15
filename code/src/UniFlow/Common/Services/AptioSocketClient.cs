@@ -47,6 +47,10 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
     private static readonly TimeSpan IdleReconnectThreshold = TimeSpan.FromSeconds(30);
     // fire-and-forget：写入后只在此窗口内尽力等一行回复（Aptio 通常不回包），超时即视为已投递
     private static readonly TimeSpan ResponseWaitTimeout = TimeSpan.FromSeconds(1);
+    // STATUS-REQUEST 是唯一期待回复的命令（Aptio 回 STATUS 状态行），给它更长的等待窗口
+    private static readonly TimeSpan StatusResponseTimeout = TimeSpan.FromSeconds(10);
+    // 重连成功后 STATUS-REQUEST 探测等待窗口（验证通讯是否真正恢复，Aptio 无 ACK）
+    private static readonly TimeSpan ProbeResponseTimeout = TimeSpan.FromSeconds(5);
     private DateTime _lastActivityUtc = DateTime.UtcNow;
 
     // 重试梯度：3s×10 → 30s×10 → 60s
@@ -161,6 +165,9 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
     }
 
     // 确保连接，梯度重试直至成功或取消
+    // 注意：Aptio 协议不回 ACK，TCP 连上 ≠ 通讯可用。
+    // 每次新连接建立后发 STATUS-REQUEST 1 探测，收到 STATUS 回复才判定连接有效；
+    // 探测失败则断开并按梯度重连（避免在"半死"连接上盲目发送业务命令）。
     private async Task EnsureConnectedAsync(CancellationToken ct)
     {
         while (!Connected)
@@ -172,6 +179,19 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
                 if (_connectAttempts > 0)
                     _logger.LogInformation("Aptio reconnected after {Attempts} attempts", _connectAttempts);
                 _connectAttempts = 0;
+
+                // 连接验证：STATUS-REQUEST 探测（Aptio 唯一会回复的命令）
+                if (!await ProbeConnectionAsync(ct))
+                {
+                    _connectAttempts++;
+                    var delay = GetRetryDelay(_connectAttempts);
+                    _logger.LogWarning("Aptio connection established but STATUS probe failed (attempt {Attempts}), retry in {Delay}s",
+                        _connectAttempts, (int)delay.TotalSeconds);
+                    DisconnectInternal();
+                    try { await Task.Delay(delay, ct); }
+                    catch (OperationCanceledException) { throw; }
+                    continue;
+                }
                 return;
             }
             catch (OperationCanceledException) { throw; }
@@ -185,6 +205,40 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
                 try { await Task.Delay(delay, ct); }
                 catch (OperationCanceledException) { throw; }
             }
+        }
+    }
+
+    // 发送 STATUS-REQUEST 1 并等待 Aptio 的状态回复；收到非空回复即认为通讯正常。
+    private async Task<bool> ProbeConnectionAsync(CancellationToken ct)
+    {
+        if (_writer == null || _reader == null)
+            return false;
+        try
+        {
+            await _writer!.WriteAsync("STATUS-REQUEST 1\r\n".AsMemory(), ct);
+            await _writer!.FlushAsync(ct);
+            _lastActivityUtc = DateTime.UtcNow;
+            _logger.LogDebug(">> STATUS-REQUEST 1 (probe)");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(ProbeResponseTimeout);
+            var response = await _reader!.ReadLineAsync(timeout.Token);
+            _lastActivityUtc = DateTime.UtcNow;
+            if (response != null)
+            {
+                _logger.LogDebug("<< {Resp} (probe)", Sanitize(response));
+                return response.StartsWith("STATUS", StringComparison.OrdinalIgnoreCase);
+            }
+            return false;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("STATUS probe timed out");
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
+        {
+            _logger.LogDebug("STATUS probe failed: {Msg}", ex.Message);
+            return false;
         }
     }
 
@@ -243,20 +297,25 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
             }
 
             // 命令已成功写入。Aptio 通常不回复（异步推送模型），
-            // 尽力在极短窗口内读一行：有则返回（如 STATUS 类），无则视为成功（fire-and-forget）。
-            return await TryReadResponseAsync(ct);
+            // 尽力在窗口内读一行：STATUS-REQUEST 期待回复用长窗口，其余 fire-and-forget 用短窗口；
+            // 无响应均视为已投递成功（不触发重试）。
+            return await TryReadResponseAsync(command, ct);
         }
         throw new InvalidOperationException($"Aptio send failed after {SendRetryCount + 1} attempts: {lastError?.Message}", lastError);
     }
 
-    // 尽力读一行响应；Aptio 不回包时在超时窗口后返回 null（不算失败，不触发重试）
-    private async Task<string?> TryReadResponseAsync(CancellationToken ct)
+    // 尽力读一行响应；Aptio 不回包时在超时窗口后返回 null（不算失败，不触发重试）。
+    // STATUS-REQUEST 类命令期待 Aptio 状态回复，用更长窗口；其余 fire-and-forget 命令用短窗口。
+    private async Task<string?> TryReadResponseAsync(string command, CancellationToken ct)
     {
         if (_reader == null) return null;
         try
         {
+            var wait = command.StartsWith("STATUS-REQUEST", StringComparison.OrdinalIgnoreCase)
+                ? StatusResponseTimeout
+                : ResponseWaitTimeout;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(ResponseWaitTimeout);
+            timeout.CancelAfter(wait);
             var response = await _reader.ReadLineAsync(timeout.Token);
             _lastActivityUtc = DateTime.UtcNow;
             if (response != null)
