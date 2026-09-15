@@ -41,6 +41,12 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
     // 命令队列保留时长：足够错误恢复
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromHours(1);
 
+    // 发送失败自动重发次数（命令在重连后原样重发，如 ORDER…C 取消类幂等命令安全）
+    private const int SendRetryCount = 3;
+    // 空闲超过该时长即视为可能"半开"连接，发送前主动重建（避免写已断连接撞 WSAECONNABORTED）
+    private static readonly TimeSpan IdleReconnectThreshold = TimeSpan.FromSeconds(30);
+    private DateTime _lastActivityUtc = DateTime.UtcNow;
+
     // 重试梯度：3s×10 → 30s×10 → 60s
     private const int QuickAttempts = 10;
     private const int MediumAttempts = 20;
@@ -191,20 +197,54 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
 
     private async Task<string?> SendCoreAsync(string command, CancellationToken ct)
     {
-        // 发送前确保已连接
-        await EnsureConnectedAsync(ct);
+        Exception? lastError = null;
+        for (var attempt = 0; attempt <= SendRetryCount; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
 
-        if (!Connected || _writer == null || _reader == null)
-            throw new InvalidOperationException("Not connected");
+            // 发送前确保已连接
+            await EnsureConnectedAsync(ct);
 
-        await _writer!.WriteAsync(command.AsMemory(), ct);
-        await _writer!.WriteAsync("\r\n".AsMemory(), ct);
-        await _writer!.FlushAsync(ct);
-        _logger.LogDebug(">> {Cmd}", Sanitize(command));
-        var response = await _reader!.ReadLineAsync(ct);
-        if (response != null)
-            _logger.LogDebug("<< {Resp}", Sanitize(response));
-        return response;
+            if (!Connected || _writer == null || _reader == null)
+                throw new InvalidOperationException("Not connected");
+
+            // 方案2：空闲过久 → 主动重建连接，避免对端已关闭但本地仍以为在线（半开连接）
+            var idle = DateTime.UtcNow - _lastActivityUtc;
+            if (idle > IdleReconnectThreshold)
+            {
+                _logger.LogInformation("Aptio connection idle for {Idle}s, refreshing before send", (int)idle.TotalSeconds);
+                DisconnectInternal();
+                await EnsureConnectedAsync(ct);
+                if (!Connected || _writer == null || _reader == null)
+                    throw new InvalidOperationException("Not connected after idle refresh");
+            }
+
+            try
+            {
+                await _writer!.WriteAsync(command.AsMemory(), ct);
+                await _writer!.WriteAsync("\r\n".AsMemory(), ct);
+                await _writer!.FlushAsync(ct);
+                _lastActivityUtc = DateTime.UtcNow;
+                _logger.LogDebug(">> {Cmd}", Sanitize(command));
+                var response = await _reader!.ReadLineAsync(ct);
+                _lastActivityUtc = DateTime.UtcNow;
+                if (response != null)
+                    _logger.LogDebug("<< {Resp}", Sanitize(response));
+                return response;
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException || ex is OperationCanceledException)
+            {
+                // 方案1：发送/读取失败 → 断开重连 → 原命令重发（最多 SendRetryCount 次）
+                if (ct.IsCancellationRequested) throw;
+                lastError = ex;
+                _logger.LogWarning("Aptio send failed (attempt {Attempt}/{Max}): {Msg} — reconnecting and retrying",
+                    attempt + 1, SendRetryCount + 1, ex.Message);
+                DisconnectInternal();
+                try { await Task.Delay(TimeSpan.FromMilliseconds(500), ct); }
+                catch (OperationCanceledException) { throw; }
+            }
+        }
+        throw new InvalidOperationException($"Aptio send failed after {SendRetryCount + 1} attempts: {lastError?.Message}", lastError);
     }
 
     private async Task ConnectCoreAsync(CancellationToken ct)
