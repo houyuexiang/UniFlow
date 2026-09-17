@@ -35,14 +35,18 @@ public class SampleCleanupService
 
     public async Task ExecuteAsync(CancellationToken ct = default)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await InitDeleteSqlAsync();
+            _logger.LogInformation("InitDeleteSqlAsync done in {Ms}ms", sw.ElapsedMilliseconds);
             await ProcessTriggeredDeletionAsync();
+            _logger.LogInformation("ProcessTriggeredDeletionAsync done in {Ms}ms (total {TotalMs}ms)",
+                sw.ElapsedMilliseconds, sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Sample cleanup error");
+            _logger.LogError(ex, "Sample cleanup error after {Ms}ms", sw.ElapsedMilliseconds);
             _errors.Report("DmsCleanup", "ERROR", ex.Message);
         }
     }
@@ -140,15 +144,23 @@ public class SampleCleanupService
             var testName = rule.TestName;
             var timeoutMin = rule.TimeoutMinutes;
 
+            // 用索引友好的范围条件替代 TIMESTAMPDIFF(...) > N（后者无法使用 datrequest 索引，大表会全表扫描）
+            // 语义等价：datrequest 距今超过 timeoutMin 分钟
+            var cutoff = DateTime.Now.AddMinutes(-timeoutMin);
             var sql = $"SELECT DISTINCT codsid FROM {_config.DbName}.reqtest " +
-                      $"WHERE codtest = @TestName AND TIMESTAMPDIFF(MINUTE, datrequest, NOW()) > @Timeout";
+                      $"WHERE codtest = @TestName AND datrequest < @Cutoff";
             try
             {
+                var qSw = System.Diagnostics.Stopwatch.StartNew();
                 using var conn = _db.NewConnection();
                 var sids = (await conn.QueryAsync<string>(sql,
-                    new { TestName = testName, Timeout = timeoutMin })).ToList();
+                    new { TestName = testName, Cutoff = cutoff })).ToList();
+                qSw.Stop();
+                _logger.LogInformation("Trigger query for {Test} returned {Count} sid(s) in {Ms}ms",
+                    testName, sids.Count, qSw.ElapsedMilliseconds);
                 if (sids.Count == 0) continue;
 
+                var dSw = System.Diagnostics.Stopwatch.StartNew();
                 foreach (var sid in sids)
                 {
                     if (string.IsNullOrEmpty(sid)) continue;
@@ -163,6 +175,9 @@ public class SampleCleanupService
                     _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test}, {Rows} row(s)",
                         sid, oid, testName, affected);
                 }
+                dSw.Stop();
+                _logger.LogInformation("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s))",
+                    testName, dSw.ElapsedMilliseconds, sids.Count);
             }
             catch (Exception ex)
             {
