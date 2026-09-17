@@ -144,17 +144,17 @@ public class SampleCleanupService
             var testName = rule.TestName;
             var timeoutMin = rule.TimeoutMinutes;
 
-            // 用索引友好的范围条件替代 TIMESTAMPDIFF(...) > N（后者无法使用 datrequest 索引，大表会全表扫描）
-            // 语义等价：datrequest 距今超过 timeoutMin 分钟
-            var cutoff = DateTime.Now.AddMinutes(-timeoutMin);
+            // 超时判断必须用数据库时钟：datrequest 由数据库侧写入，
+            // 若用 UniFlow 的 DateTime.Now 作 cutoff，两机时钟差会导致误删/延迟。
+            // NOW() - INTERVAL n MINUTE 既与 datrequest 同时钟源，又是范围比较（datrequest 有索引时可用）。
             var sql = $"SELECT DISTINCT codsid FROM {_config.DbName}.reqtest " +
-                      $"WHERE codtest = @TestName AND datrequest < @Cutoff";
+                      $"WHERE codtest = @TestName AND datrequest < NOW() - INTERVAL @Timeout MINUTE";
             try
             {
                 var qSw = System.Diagnostics.Stopwatch.StartNew();
                 using var conn = _db.NewConnection();
                 var sids = (await conn.QueryAsync<string>(sql,
-                    new { TestName = testName, Cutoff = cutoff })).ToList();
+                    new { TestName = testName, Timeout = timeoutMin })).ToList();
                 qSw.Stop();
                 _logger.LogInformation("Trigger query for {Test} returned {Count} sid(s) in {Ms}ms",
                     testName, sids.Count, qSw.ElapsedMilliseconds);
