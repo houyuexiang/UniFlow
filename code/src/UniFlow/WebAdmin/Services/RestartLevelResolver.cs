@@ -96,6 +96,7 @@ public static class RestartLevelResolver
         if (t == typeof(List<int>)) return "intArray";
         if (t == typeof(List<TriggerRule>)) return "triggerRules";
         if (t == typeof(List<TimeRangeDto>)) return "timeRanges";
+        if ((Nullable.GetUnderlyingType(t) ?? t).IsEnum) return "string";   // 枚举（含可空）按字符串传
         return "unknown";
     }
 

@@ -47,40 +47,55 @@ public class SampleCleanupService
         }
     }
 
-    // 发送取消报文：用删除前取得的测试名拼完整 ORDER 取消帧。
-    // 字段布局（DCAU 手册 ORDER 帧）：Action-Code=C 在索引12，Test-Request-i 从索引17起。
-    // 报文: ORDER {sid}|...|C|{test1}|{test2}...
-    private async Task SendCancelToAptioAsync(string sid, List<string> tests)
+    // 按配置向 Aptio 发送联动报文（None=不发 / Cancel=ORDER C / Complete=S002 COMPLETE）
+    private async Task SendAptioActionAsync(string sid, List<string> tests)
     {
-        if (!_config.SampleCleanup.SendCancelMessageToAptio) return;
+        var mode = ResolveActionMode();
+        if (mode == Models.AptioActionMode.None) return;
         try
         {
-            var cmd = BuildCancelCommand(sid, tests);
+            // 换行符由 AptioSocketClient 发送层统一追加，勿自带 CR/LF 以免双换行
+            var cmd = mode == Models.AptioActionMode.Cancel
+                ? BuildCancelCommand(sid, tests)
+                : BuildCompleteCommand(sid);
             if (!_aptioSocket.Connected)
                 await _aptioSocket.ConnectAsync();
-            // 换行符由 AptioSocketClient 发送层统一追加，勿自带 CR/LF 以免双换行
             await _aptioSocket.SendAsync(cmd);
-            _logger.LogInformation("Cancel sent to Aptio for {Sid}: {Cmd}", sid, cmd);
+            _logger.LogInformation("{Action} sent to Aptio for {Sid}: {Cmd}", mode, sid, cmd);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Cancel to Aptio failed for {Sid}: {Msg}", sid, ex.Message);
+            _logger.LogWarning("{Action} to Aptio failed for {Sid}: {Msg}", mode, sid, ex.Message);
         }
+    }
+
+    // AptioAction 未设置（null）时回退旧布尔开关 SendCancelMessageToAptio（向后兼容）
+    private Models.AptioActionMode ResolveActionMode()
+    {
+        var mode = _config.SampleCleanup.AptioAction;
+        if (mode.HasValue) return mode.Value;
+        return _config.SampleCleanup.SendCancelMessageToAptio ? Models.AptioActionMode.Cancel : Models.AptioActionMode.None;
     }
 
     // 拼 ORDER 取消帧（DCAU 手册 ORDER 帧字段布局）：
     //   index 0  = Sample ID
     //   index 12 = Action-Code = C
     //   index 13-16 = Sample-Source 等（取消时留空）
-    //   index 17 = Test-Request-1（多个测试名在同一字段内用 ^ 连接，tci^tni^tti）
+    //   index 17,18,... = Test-Request-1, Test-Request-2, ...（每个测试一个顶层字段，| 分隔）
     internal static string BuildCancelCommand(string sid, IReadOnlyCollection<string> tests)
     {
         var fields = new List<string>(18) { "ORDER " + sid };   // index 0
         for (var i = 1; i <= 11; i++) fields.Add("");            // index 1-11 空
         fields.Add("C");                                          // index 12 = Action-Code
         for (var i = 13; i <= 16; i++) fields.Add("");            // index 13-16 空
-        fields.Add(string.Join("^", tests));                      // index 17 = Test-Request-1
+        foreach (var t in tests) fields.Add(t);                   // index 17,18,... = Test-Request-i
         return string.Join("|", fields);
+    }
+
+    // 拼 S002 完成帧：COMMENT S002^<Sample-ID>\COMPLETE^S（全部测试完成）
+    internal static string BuildCompleteCommand(string sid)
+    {
+        return $"COMMENT S002^{sid}\\COMPLETE^S";
     }
 
     // 构建删除模板：动态扫描 information_schema，自动纳入含 codsid/codoid 列的所有表
@@ -141,10 +156,10 @@ public class SampleCleanupService
                     var oid = await _db.GetOidBySidAsync(sid);
                     if (string.IsNullOrEmpty(oid))
                         _logger.LogWarning("No oid found in reqtube for sample {Sid}, orders may not be deleted", sid);
-                    // 先取测试名（reqtest 删除后就查不到了），用于拼取消报文
+                    // 先取测试名（reqtest 删除后就查不到了），用于拼联动报文
                     var tests = await _db.GetTestsBySidAsync(sid);
                     var affected = await _db.DeleteSampleAsync(sid, oid, _deleteSqlTemplates!);
-                    await SendCancelToAptioAsync(sid, tests);
+                    await SendAptioActionAsync(sid, tests);
                     _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test}, {Rows} row(s)",
                         sid, oid, testName, affected);
                 }

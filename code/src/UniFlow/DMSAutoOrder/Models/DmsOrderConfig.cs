@@ -48,6 +48,8 @@ public class DmsStatusCorrectionConfig
     }
 }
 
+public enum AptioActionMode { None, Cancel, Complete }
+
 public class DmsSampleCleanupConfig
 {
     // 新 JSON 格式：TriggerRules 数组（表单保存写这里）
@@ -55,6 +57,9 @@ public class DmsSampleCleanupConfig
     // 旧格式（兼容）：分号拼接 "RMSMP:1;XXX:5"，TriggerRules 为空时使用
     [Restart(RestartLevel.InnerRestart)] public string TestTriggerSampleDeletion { get; set; } = "";
     [Restart(RestartLevel.InnerRestart)] public bool SendCancelMessageToAptio { get; set; }
+    // 删除工单后的 Aptio 联动动作：None=不发 / Cancel=ORDER C / Complete=S002 COMPLETE；
+    // null（未设置）时回退 SendCancelMessageToAptio 布尔值（向后兼容旧配置）
+    [Restart(RestartLevel.InnerRestart)] public AptioActionMode? AptioAction { get; set; }
 
     // 统一读取入口：新格式优先，旧格式宽容解析
     public List<TriggerRule> GetRules()

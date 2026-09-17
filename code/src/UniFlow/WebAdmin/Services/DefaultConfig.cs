@@ -35,7 +35,7 @@ public static class DefaultConfig
             "Enabled": false, "DbHost": "127.0.0.1", "DbPort": 3306, "DbUser": "root", "DbPassword": "", "DbName": "dms",
             "LoopIntervalSeconds": 60, "PitStop": { "TimeoutMinutes": 1 },
             "StatusCorrection": { "AutoModifyTestStatus": "1", "IgnoreFlags": null, "IgnoreFlagList": "" },
-            "SampleCleanup": { "TriggerRules": null, "TestTriggerSampleDeletion": "", "SendCancelMessageToAptio": false }
+            "SampleCleanup": { "TriggerRules": null, "TestTriggerSampleDeletion": "", "SendCancelMessageToAptio": false, "AptioAction": "Cancel" }
           }
         }
         """;
