@@ -227,8 +227,10 @@
 |------|------|--------|------|
 | `SampleCleanup.TriggerRules` | JSON 数组 | `null` | 工单删除规则；**新格式（表单保存写这里）**；示例：`[{"TestName":"RMSMP","TimeoutMinutes":1}]`；超时 0=到期即删 |
 | `SampleCleanup.TestTriggerSampleDeletion` | string | `` | 触发样本删除的测试名（旧格式，`测试名:超时分钟;`）；仅在 `TriggerRules` 为 null 时使用（兼容） |
-| `SampleCleanup.SendCancelMessageToAptio` | bool | `false` | 删除样本时是否发送取消消息到 Aptio（`ORDER…C` 取消整个样本的待处理测试） |
+| `SampleCleanup.AptioAction` | 枚举 | `Cancel` | 删除工单后向 Aptio 发送的联动动作：`None`=不发 / `Cancel`=发 `ORDER…C` 取消报文（Test-Request 以 `|` 分隔，索引 17 起）/ `Complete`=发 `COMMENT S002^{sid}\COMPLETE^S`（全部测试完成）；未设置时回退下方兼容开关 |
+| `SampleCleanup.SendCancelMessageToAptio` | bool | `false` | 旧版兼容开关：仅当 `AptioAction` 未设置时生效，决定是否向 Aptio 发送 `ORDER…C` 取消报文 |
 
+> 联动报文发送后会以 **Information** 级完整记录到日志（含帧内容，便于排查）。
 > 删除表列表由程序动态扫描 `information_schema`（含 `codsid`/`codoid` 列的表）自动生成，无需配置（每天重建模板）。
 
 ---
