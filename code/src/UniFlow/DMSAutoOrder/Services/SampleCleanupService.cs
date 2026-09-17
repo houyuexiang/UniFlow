@@ -161,23 +161,29 @@ public class SampleCleanupService
                 if (sids.Count == 0) continue;
 
                 var dSw = System.Diagnostics.Stopwatch.StartNew();
+                long tOid = 0, tTests = 0, tDel = 0, tSend = 0;
                 foreach (var sid in sids)
                 {
                     if (string.IsNullOrEmpty(sid)) continue;
+                    var step = System.Diagnostics.Stopwatch.StartNew();
                     // 先通过 sid 获取 oid（reqtube），再删除关联记录（含 orders）
                     var oid = await _db.GetOidBySidAsync(sid);
+                    tOid += step.ElapsedMilliseconds; step.Restart();
                     if (string.IsNullOrEmpty(oid))
                         _logger.LogWarning("No oid found in reqtube for sample {Sid}, orders may not be deleted", sid);
                     // 先取测试名（reqtest 删除后就查不到了），用于拼联动报文
                     var tests = await _db.GetTestsBySidAsync(sid);
+                    tTests += step.ElapsedMilliseconds; step.Restart();
                     var affected = await _db.DeleteSampleAsync(sid, oid, _deleteSqlTemplates!);
+                    tDel += step.ElapsedMilliseconds; step.Restart();
                     await SendAptioActionAsync(sid, tests);
+                    tSend += step.ElapsedMilliseconds;
                     _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test}, {Rows} row(s)",
                         sid, oid, testName, affected);
                 }
                 dSw.Stop();
-                _logger.LogInformation("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s))",
-                    testName, dSw.ElapsedMilliseconds, sids.Count);
+                _logger.LogInformation("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s)) | breakdown: getOid={Oid}ms getTests={Tests}ms delete={Del}ms send={Send}ms",
+                    testName, dSw.ElapsedMilliseconds, sids.Count, tOid, tTests, tDel, tSend);
             }
             catch (Exception ex)
             {

@@ -296,9 +296,11 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
                 continue;
             }
 
-            // 命令已成功写入。Aptio 通常不回复（异步推送模型），
-            // 尽力在窗口内读一行：STATUS-REQUEST 期待回复用长窗口，其余 fire-and-forget 用短窗口；
-            // 无响应均视为已投递成功（不触发重试）。
+            // 命令已成功写入。Aptio 协议为 fire-and-forget：COMMENT/ORDER 等命令写入成功即已投递，
+            // Aptio 不会回复，立即返回（不等待），避免每个命令白白阻塞 1s（批量删除样本时累积成分钟级延迟）。
+            // 仅 STATUS-REQUEST 期待 Aptio 状态回复，需要读取。
+            if (!command.StartsWith("STATUS-REQUEST", StringComparison.OrdinalIgnoreCase))
+                return null;
             return await TryReadResponseAsync(command, ct);
         }
         throw new InvalidOperationException($"Aptio send failed after {SendRetryCount + 1} attempts: {lastError?.Message}", lastError);
