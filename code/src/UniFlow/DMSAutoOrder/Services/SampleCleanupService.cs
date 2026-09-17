@@ -44,9 +44,9 @@ public class SampleCleanupService
         try
         {
             await InitDeleteSqlAsync();
-            _logger.LogInformation("InitDeleteSqlAsync done in {Ms}ms", sw.ElapsedMilliseconds);
+            _logger.LogDebug("InitDeleteSqlAsync done in {Ms}ms", sw.ElapsedMilliseconds);
             await ProcessTriggeredDeletionAsync();
-            _logger.LogInformation("ProcessTriggeredDeletionAsync done in {Ms}ms (total {TotalMs}ms)",
+            _logger.LogDebug("ProcessTriggeredDeletionAsync done in {Ms}ms (total {TotalMs}ms)",
                 sw.ElapsedMilliseconds, sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
@@ -161,7 +161,7 @@ public class SampleCleanupService
                 using var conn = _db.NewConnection();
                 var sids = (await conn.QueryAsync<string>(sql, new { TestName = testName })).ToList();
                 qSw.Stop();
-                _logger.LogInformation("Trigger query for {Test} returned {Count} sid(s) in {Ms}ms",
+                _logger.LogDebug("Trigger query for {Test} returned {Count} sid(s) in {Ms}ms",
                     testName, sids.Count, qSw.ElapsedMilliseconds);
 
                 var current = new HashSet<string>(StringComparer.Ordinal);
@@ -213,7 +213,7 @@ public class SampleCleanupService
                         sid, oid, testName, ageSec, affected);
                 }
                 dSw.Stop();
-                _logger.LogInformation("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s)) | breakdown: getOid={Oid}ms getTests={Tests}ms delete={Del}ms send={Send}ms",
+                _logger.LogDebug("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s)) | breakdown: getOid={Oid}ms getTests={Tests}ms delete={Del}ms send={Send}ms",
                     testName, dSw.ElapsedMilliseconds, toDelete.Count, tOid, tTests, tDel, tSend);
             }
             catch (Exception ex)

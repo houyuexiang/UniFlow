@@ -268,7 +268,7 @@ public class AptioSocketClient : IAptioSocketClient, IHostedService, IDisposable
             var idle = DateTime.UtcNow - _lastActivityUtc;
             if (idle > IdleReconnectThreshold)
             {
-                _logger.LogInformation("Aptio connection idle for {Idle}s, refreshing before send", (int)idle.TotalSeconds);
+                _logger.LogDebug("Aptio connection idle for {Idle}s, refreshing before send", (int)idle.TotalSeconds);
                 DisconnectInternal();
                 await EnsureConnectedAsync(ct);
                 if (!Connected || _writer == null || _reader == null)
