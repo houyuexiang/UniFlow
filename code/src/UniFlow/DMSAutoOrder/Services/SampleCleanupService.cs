@@ -19,6 +19,11 @@ public class SampleCleanupService
     private const string CR = "\r";
     private const string LF = "\n";
 
+    // 超时计时基准：UniFlow 首次检测到该样本的时间（key = "{testName}\u0001{sid}"）。
+    // 不用 reqtest.datrequest——那是 DMS/仪器侧写入的时间，可能不可靠（非插库时间、且 UniFlow 当时可能未启动）。
+    // 仅内存态：进程重启后重新计时（保守，不会误删）。
+    private readonly Dictionary<string, DateTime> _firstSeenUtc = new();
+
     public SampleCleanupService(
         ILogger<SampleCleanupService> logger,
         DmsDatabaseService db,
@@ -139,32 +144,55 @@ public class SampleCleanupService
         var rules = _config.SampleCleanup.GetRules();
         if (rules.Count == 0) return;
 
+        var nowUtc = DateTime.UtcNow;
+
         foreach (var rule in rules)
         {
             var testName = rule.TestName;
             var timeoutMin = rule.TimeoutMinutes;
+            var prefix = testName + "\u0001";
 
-            // 超时判断必须用数据库时钟：datrequest 由数据库侧写入，
-            // 若用 UniFlow 的 DateTime.Now 作 cutoff，两机时钟差会导致误删/延迟。
-            // NOW() - INTERVAL n MINUTE 既与 datrequest 同时钟源，又是范围比较（datrequest 有索引时可用）。
+            // 查出该测试名下的全部样本（不按时间过滤——超时由 UniFlow 首次检测时间起算）
             var sql = $"SELECT DISTINCT codsid FROM {_config.DbName}.reqtest " +
-                      $"WHERE codtest = @TestName AND datrequest < NOW() - INTERVAL @Timeout MINUTE";
+                      $"WHERE codtest = @TestName";
             try
             {
                 var qSw = System.Diagnostics.Stopwatch.StartNew();
                 using var conn = _db.NewConnection();
-                var sids = (await conn.QueryAsync<string>(sql,
-                    new { TestName = testName, Timeout = timeoutMin })).ToList();
+                var sids = (await conn.QueryAsync<string>(sql, new { TestName = testName })).ToList();
                 qSw.Stop();
                 _logger.LogInformation("Trigger query for {Test} returned {Count} sid(s) in {Ms}ms",
                     testName, sids.Count, qSw.ElapsedMilliseconds);
-                if (sids.Count == 0) continue;
 
-                var dSw = System.Diagnostics.Stopwatch.StartNew();
-                long tOid = 0, tTests = 0, tDel = 0, tSend = 0;
+                var current = new HashSet<string>(StringComparer.Ordinal);
+                var toDelete = new List<string>();
                 foreach (var sid in sids)
                 {
                     if (string.IsNullOrEmpty(sid)) continue;
+                    var key = prefix + sid;
+                    current.Add(key);
+                    if (!_firstSeenUtc.TryGetValue(key, out var firstSeen))
+                    {
+                        // 首次检测：记录起点，本轮不删
+                        _firstSeenUtc[key] = nowUtc;
+                        _logger.LogInformation("Trigger watch start: {Test} sid={Sid} (timeout {Timeout}min)",
+                            testName, sid, timeoutMin);
+                        continue;
+                    }
+                    if (nowUtc - firstSeen >= TimeSpan.FromMinutes(timeoutMin))
+                        toDelete.Add(sid);
+                }
+
+                // 清理已消失（被删除/不再匹配）的计时项
+                foreach (var key in _firstSeenUtc.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal) && !current.Contains(k)).ToList())
+                    _firstSeenUtc.Remove(key);
+
+                if (toDelete.Count == 0) continue;
+
+                var dSw = System.Diagnostics.Stopwatch.StartNew();
+                long tOid = 0, tTests = 0, tDel = 0, tSend = 0;
+                foreach (var sid in toDelete)
+                {
                     var step = System.Diagnostics.Stopwatch.StartNew();
                     // 先通过 sid 获取 oid（reqtube），再删除关联记录（含 orders）
                     var oid = await _db.GetOidBySidAsync(sid);
@@ -178,12 +206,15 @@ public class SampleCleanupService
                     tDel += step.ElapsedMilliseconds; step.Restart();
                     await SendAptioActionAsync(sid, tests);
                     tSend += step.ElapsedMilliseconds;
-                    _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test}, {Rows} row(s)",
-                        sid, oid, testName, affected);
+                    var ageSec = _firstSeenUtc.TryGetValue(prefix + sid, out var fs)
+                        ? (int)(nowUtc - fs).TotalSeconds : 0;
+                    _firstSeenUtc.Remove(prefix + sid);
+                    _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test} after {Age}s, {Rows} row(s)",
+                        sid, oid, testName, ageSec, affected);
                 }
                 dSw.Stop();
                 _logger.LogInformation("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s)) | breakdown: getOid={Oid}ms getTests={Tests}ms delete={Del}ms send={Send}ms",
-                    testName, dSw.ElapsedMilliseconds, sids.Count, tOid, tTests, tDel, tSend);
+                    testName, dSw.ElapsedMilliseconds, toDelete.Count, tOid, tTests, tDel, tSend);
             }
             catch (Exception ex)
             {
