@@ -31,7 +31,8 @@ public class AptioCommandService
 
     public async Task<bool> SendStatPriorityAsync(string barcode, CancellationToken ct = default)
     {
-        var cmd = $"COMMENT S010^{barcode}^S";
+        // 手册 §9.5：COMMENT S010^<Sample-ID>\<New-Priority>^S，New-Priority 为 A(ASAP)/S(STAT)
+        var cmd = $"COMMENT S010^{barcode}\\S^S";
         _logger.LogInformation("Stat Priority: {Cmd}", cmd);
         var ack = await _socket.SendAsync(cmd, ct);
         return ack?.StartsWith("ACK") == true;

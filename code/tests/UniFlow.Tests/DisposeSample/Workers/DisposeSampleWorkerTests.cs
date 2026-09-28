@@ -1,43 +1,47 @@
 using Shouldly;
 using NSubstitute;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using UniFlow.Common.Models;
 using UniFlow.Common.Services;
 using UniFlow.DisposeSample.Models;
 using UniFlow.DisposeSample.Services;
 using UniFlow.DisposeSample.Workers;
+using UniFlow.WebAdmin.Services;
 
 namespace UniFlow.Tests.DisposeSample.Workers;
 
-public class DisposeSampleWorkerTests
+public class DisposeSampleWorkerTests : IDisposable
 {
     private readonly IAptioSocketClient _socket = Substitute.For<IAptioSocketClient>();
     private readonly IDisposeDatabaseService _db = Substitute.For<IDisposeDatabaseService>();
     private readonly SrmStatusDecoder _decoder = new();
     private readonly AptioCommandService _commands;
     private readonly DisposeSampleWorker _worker;
+    private readonly HealthStore _health;
+    private readonly string _healthDbPath;
 
     public DisposeSampleWorkerTests()
     {
-        var aptioConfig = Options.Create(new AptioConfig
+        var aptioConfig = new AptioConfig
         {
             Ip = "127.0.0.1",
             Port = 2055,
-            SrmNodeIds = new() { "18" }
-        });
-        var autoProcessConfig = Options.Create(new AptioAutoProcessConfig
-        {
-            Dispose = new AptioAutoDisposeConfig
+            SrmNodeIds = new() { "18" },
+            DisposeSample = new AptioDisposeSampleConfig
             {
+                CommandType = 0,
+                CommandName = "view_overtimestoragesample",
                 DiscardRunDate = "1,2,3,4,5,6,7",
                 DiscardTimeRange = "00:00-23:59,9999;",
                 MaxWaitDiscardCount = 3,
                 MaxOnetimeSelectDiscardCount = 10,
-                AllowSrmErrorCode = "0000"
+                AllowSrmErrorCode = "0000",
+                SkipOnUnknownNode = true
             }
-        });
+        };
 
+        _healthDbPath = Path.Combine(Path.GetTempPath(), $"uniflow-test-{Guid.NewGuid():N}.db");
+        _health = new HealthStore(_healthDbPath, NullLogger<HealthStore>.Instance);
         _commands = new AptioCommandService(_socket, NullLogger<AptioCommandService>.Instance);
         _worker = new DisposeSampleWorker(
             NullLogger<DisposeSampleWorker>.Instance,
@@ -45,15 +49,15 @@ public class DisposeSampleWorkerTests
             _db,
             _commands,
             _decoder,
-            aptioConfig,
-            autoProcessConfig);
+            _health);
+        _worker.LoadConfig(aptioConfig);
 
         _socket.Connected.Returns(true);
     }
 
     private void SetStatusResponse(string? response)
     {
-        _socket.SendAndReceiveAsync(
+        _socket.SendAsync(
             Arg.Is<string>(s => s == "STATUS-REQUEST 1"),
             Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(response));
@@ -61,7 +65,7 @@ public class DisposeSampleWorkerTests
 
     private void SetAckResponse(string? response)
     {
-        _socket.SendAndReceiveAsync(
+        _socket.SendAsync(
             Arg.Is<string>(s => s.StartsWith("COMMENT")),
             Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(response));
@@ -173,7 +177,7 @@ public class DisposeSampleWorkerTests
         _worker.CurrentState = SysStatus.Ready;
         SetStatusResponse(@"STATUS\18^SRM^1^ON^0000^G^^\");
         _db.SelectOneSendRecordAsync()
-            .Returns(Task.FromResult<DisposeStatus?>(new DisposeStatus { Barcode = "S001" }));
+            .Returns(Task.FromResult<DisposeStatus?>(new DisposeStatus { Barcode = "S001", Location = "&1-18-000001" }));
         SetAckResponse(null);
 
         await _worker.HandleReadyAsync();
@@ -252,5 +256,11 @@ public class DisposeSampleWorkerTests
         await _worker.HandleDisposeAsync();
 
         _worker.CurrentState.ShouldBe(SysStatus.Dispose);
+    }
+
+    public void Dispose()
+    {
+        _health.Dispose();
+        try { File.Delete(_healthDbPath); } catch { /* ignore */ }
     }
 }

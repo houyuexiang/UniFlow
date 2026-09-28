@@ -683,7 +683,7 @@ STATUS-REQUEST 1
 |--------------|--------|----------|
 | `SendDisposeAsync`（16–22） | `COMMENT S002^{barcode}\TRASH^S` | §3.1 S002 `TRASH` 属性 |
 | `SendDeliverAsync`（24–30） | `COMMENT S002^{barcode}\DELIVER^S` | §3.1 S002 `DELIVER` 属性 |
-| `SendStatPriorityAsync`（32–38） | `COMMENT S010^{barcode}^S` | §3.2 S010；⚠️ 代码省略了手册格式中的 `<New-Priority>` 子字段（手册要求 `\<New-Priority>`，`A`=ASAP/`S`=STAT） |
+| `SendStatPriorityAsync`（32–39） | `COMMENT S010^{barcode}\S^S` | §3.2/§9.5 S010；已按手册补齐 `<New-Priority>` 子字段，当前固定 `S`(STAT)，`A`(ASAP) 需 R20 及以上 |
 
 传输层（`code/src/UniFlow/Common/Services/AptioSocketClient.cs`）：`Encoding.ASCII`、`NewLine = "\r\n"`（CRLF），与 §5 一致。
 

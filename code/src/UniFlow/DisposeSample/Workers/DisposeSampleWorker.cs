@@ -61,17 +61,30 @@ public class DisposeSampleWorker : BackgroundService
                     if (parsed != null) _aptio = parsed;
                 }
                 catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, keeping previous values: {Raw}", ap.GetRawText()); }
-                _dc = _aptio.DisposeSample ?? new();
             }
-            // 统一入口：新 JSON 格式（RunDays/TimeRanges/AllowedSrmErrorCodes）优先，旧串兜底
-            _runDays = _dc.GetRunDays();
-            _timeRanges = _dc.GetTimeRanges();
-            _allowErrors = _dc.GetAllowedErrors();
+            ApplyDerivedConfig();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "DisposeSample config reload failed, keeping previous values");
         }
+    }
+
+    // 供测试/外部显式注入配置（生产运行时由构造函数与 ExecuteAsync 循环经 RefreshConfig 从 appsettings.json 加载）
+    public void LoadConfig(AptioConfig aptio, FeatureConfig? features = null)
+    {
+        _aptio = aptio;
+        if (features != null) _features = features;
+        ApplyDerivedConfig();
+    }
+
+    private void ApplyDerivedConfig()
+    {
+        _dc = _aptio.DisposeSample ?? new();
+        // 统一入口：新 JSON 格式（RunDays/TimeRanges/AllowedSrmErrorCodes）优先，旧串兜底
+        _runDays = _dc.GetRunDays();
+        _timeRanges = _dc.GetTimeRanges();
+        _allowErrors = _dc.GetAllowedErrors();
     }
 
     public SysStatus CurrentState { get => _state; set => _state = value; }

@@ -31,7 +31,8 @@ public class ExportFileServiceTests : IDisposable
         var content = await File.ReadAllTextAsync(path);
         content.ShouldContain("SAMPLE001");
         content.ShouldContain("SAMPLE002");
-        content.ShouldContain("Total: 2");
+        content.ShouldContain("20260726");
+        Path.GetFileName(path).ShouldEndWith("_2.txt");
     }
 
     [Fact]
@@ -54,7 +55,8 @@ public class ExportFileServiceTests : IDisposable
         var path = await _service.ExportAsync(new List<DisposedSample>());
 
         var content = await File.ReadAllTextAsync(path);
-        content.ShouldContain("Total: 0");
+        content.ShouldBe("Barcode\tDispose time\r\n");
+        Path.GetFileName(path).ShouldEndWith("_0.txt");
     }
 
     [Fact]
@@ -68,10 +70,8 @@ public class ExportFileServiceTests : IDisposable
         var path = await _service.ExportAsync(samples);
         var content = await File.ReadAllTextAsync(path);
 
-        content.ShouldContain("Export Time:");
-        content.ShouldContain("Barcode");
-        content.ShouldContain("Location");
-        content.ShouldContain("UpdateTime");
+        content.ShouldContain("Barcode\tDispose time");
+        content.ShouldContain("B1\tT1");
     }
 
     [Fact]

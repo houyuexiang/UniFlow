@@ -22,7 +22,10 @@ id -u uniflow &>/dev/null || {
 # Install files
 mkdir -p "$INSTALL_DIR"
 cp -f "$SCRIPT_DIR/UniFlow"          "$INSTALL_DIR/"
-cp -f "$SCRIPT_DIR/libe_sqlite3.so"  "$INSTALL_DIR/"
+# SQLite 原生库已内嵌于单文件主程序；仅当安装包额外附带时才拷贝（兼容旧包）
+if [ -f "$SCRIPT_DIR/libe_sqlite3.so" ]; then
+    cp -f "$SCRIPT_DIR/libe_sqlite3.so" "$INSTALL_DIR/"
+fi
 cp -rf "$SCRIPT_DIR/wwwroot"         "$INSTALL_DIR/"
 if [ ! -f "$INSTALL_DIR/appsettings.json" ]; then
     cp -f "$SCRIPT_DIR/appsettings.json" "$INSTALL_DIR/"
