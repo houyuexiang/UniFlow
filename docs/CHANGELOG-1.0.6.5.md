@@ -87,3 +87,18 @@ fi
   - 正常创建 `uniflow_admin.db`（内嵌 SQLite 可用）；
   - `GET /api/health` → `healthy`；
   - `GET /api/update/status` → `currentVersion = 1.0.6.5+0feb562`。
+
+---
+
+## 六、补丁（2026-10-21）：Linux 安装包补齐文档
+
+**问题**：Linux 包自 1.0.5.5 起只带 `CONFIG-REFERENCE.md`，缺 `README.md` 和 `INSTALL.md`（`INSTALL.md` 承诺了这两份；Windows 包三份齐全）。根因：`deploy/package.sh` Linux 段漏了对应的 `cp`。
+
+**修复**（commit `54dfa13`）：
+- 新增 `deploy/linux/README.md`（与 Windows README 同结构，适配 systemd / `install.sh` / journalctl）；
+- `deploy/package.sh` Linux 段补上 `INSTALL.md` + `README.md` 两条 `cp`，后续打包不再漏；
+- 重打 `UniFlow-1.0.6.5-linux-x64.tar.gz`：仅注入两份文档，`UniFlow` 可执行程序字节不变（md5 前后比对一致）。
+
+**验证**：重打后 Linux 包 md5 `18922abdbbc6543cc764c6c7d47cbd76`；包内 `INSTALL.md` / `CONFIG-REFERENCE.md` 与 Windows 包逐字节一致（`cmp` 通过），`README.md` 为平台专属。GitHub 与 NAS 两处均已替换为新包；NAS 旧包保留为 `UniFlow-1.0.6.5-linux-x64.tar.gz.old-no-docs.bak`。
+
+**流程固化**：`docs/Release-Process.md` 新增「打包产物自检」与「同步到 NAS」两步及对应发布清单项，防止复漏。
