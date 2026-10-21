@@ -54,6 +54,8 @@ cp -f  "$STAGE/pub-linux-x64/UniFlow.staticwebassets.endpoints.json" "$LINUX/uni
 cp -rf "$STAGE/pub-linux-x64/wwwroot"                          "$LINUX/uniflow/"
 cp -f  "$APP_SETTINGS"                                         "$LINUX/uniflow/appsettings.json"
 cp -f  "$ROOT/docs/CONFIG-REFERENCE.md"                        "$LINUX/uniflow/"
+cp -f  "$ROOT/deploy/INSTALL.md"                               "$LINUX/uniflow/"
+cp -f  "$ROOT/deploy/linux/README.md"                          "$LINUX/uniflow/README.md"
 cp -f  "$ROOT/deploy/linux/install.sh"                         "$LINUX/uniflow/"
 
 # ---- Windows 包（uniflow/ 目录）----
