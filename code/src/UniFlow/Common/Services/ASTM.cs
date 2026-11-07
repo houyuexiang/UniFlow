@@ -144,8 +144,10 @@ public class AstmConnection : IDisposable
 
     public string? ReadFrame(int timeoutMs = 5000)
     {
-        var start = Environment.TickCount;
-        while (Environment.TickCount - start < timeoutMs)
+        // 用 TickCount64（毫秒，64 位）：Environment.TickCount 是 32 位 int，约 24.9 天回绕，
+        // 回绕后 "now - start < timeout" 判据失效（可能永远不等、也可能立即超时）
+        var start = Environment.TickCount64;
+        while (Environment.TickCount64 - start < timeoutMs)
         {
             lock (_lock)
             {

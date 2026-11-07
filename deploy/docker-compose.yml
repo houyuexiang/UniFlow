@@ -1,7 +1,7 @@
 services:
   uniflow:
     build:
-      context: .
+      context: ..
       dockerfile: deploy/Dockerfile
     container_name: uniflow
     restart: unless-stopped
@@ -15,13 +15,24 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:5100
-      - UniFlow__Database__Host=${MYSQL_HOST:-192.168.1.200}
-      - UniFlow__Database__Port=${MYSQL_PORT:-3306}
-      - UniFlow__Database__User=${MYSQL_USER:-root}
-      - UniFlow__Database__Password=${MYSQL_PASSWORD:-root}
-      - UniFlow__Database__Database=${MYSQL_DATABASE:-flexlab}
-      - UniFlow__Aptio__Ip=${APTIO_IP:-192.168.1.200}
-      - UniFlow__WebAdmin__BindIp=0.0.0.0
+      # 环境变量覆盖：路径用 "__"（双下划线）分隔，**无 UniFlow 前缀**
+      # （应用未调用 AddEnvironmentVariables("UniFlow")，带前缀会变成死变量）
+      # 当前配置根：Aptio / Aptio:Database / Features:Aptio / WebAdmin / DMS
+      - Aptio__Database__Host=${MYSQL_HOST:-192.168.1.200}
+      - Aptio__Database__Port=${MYSQL_PORT:-3306}
+      - Aptio__Database__User=${MYSQL_USER:-root}
+      - Aptio__Database__Password=${MYSQL_PASSWORD:-root}
+      - Aptio__Database__Database=${MYSQL_DATABASE:-flexlab}
+      - Aptio__Ip=${APTIO_IP:-192.168.1.200}
+      - Aptio__Port=${APTIO_PORT:-2055}
+      - Features__Aptio__DisposeSample=${APTIO_DISPOSE_SAMPLE:-true}
+      - Features__Aptio__SrmExport=${APTIO_SRM_EXPORT:-true}
+      - Features__Aptio__Delivery=${APTIO_DELIVERY:-false}
+      - Features__Aptio__DeliveryFile=${APTIO_DELIVERY_FILE:-false}
+      - Features__Aptio__Priority=${APTIO_PRIORITY:-false}
+      - Features__Aptio__TestNameDispose=${APTIO_TEST_NAME_DISPOSE:-false}
+      - WebAdmin__BindIp=0.0.0.0
+      - WebAdmin__Port=5100
 
 volumes:
   uniflow_config:

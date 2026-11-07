@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Dispose 丢弃状态机",
+    "subtitle": "发送窗口=10、等待确认、5 分钟重排队（最多 24 次）与终态",
+    "output": "docs/dispose-state-machine.html",
+    "viewBox": [
+      1120,
+      760
+    ],
+    "quality_profile": "standard",
+    "views": [
+      {
+        "id": "main-loop",
+        "label": "主循环",
+        "focus": [
+          "none",
+          "ready",
+          "ack",
+          "dispose"
+        ],
+        "note": "从空闲到发送、等待确认、收尾回到空闲。"
+      },
+      {
+        "id": "window-waits",
+        "label": "窗口等待",
+        "focus": [
+          "ready",
+          "waitActive",
+          "waitInFlight",
+          "waitNode"
+        ],
+        "note": "插入窗口、在途窗口、节点未就绪/投递失败时的等待路径。"
+      },
+      {
+        "id": "maintenance-terminal",
+        "label": "维护与终态",
+        "focus": [
+          "maint",
+          "resend",
+          "disposed",
+          "skipped",
+          "failed"
+        ],
+        "note": "每 60 秒补查、每 5 分钟重排队；命中 &3 为已丢弃，24 次用尽为失败，未知节点为跳过。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "主循环（一次一条）"
+    },
+    {
+      "id": "waiting",
+      "label": "窗口 / 等待"
+    },
+    {
+      "id": "maint",
+      "label": "60 秒维护（并行）"
+    },
+    {
+      "id": "terminal",
+      "label": "终态"
+    }
+  ],
+  "states": [
+    {
+      "id": "none",
+      "type": "start",
+      "label": "None 空闲",
+      "sublabel": "清历史 → 有待发就 Ready",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "入口"
+    },
+    {
+      "id": "ready",
+      "type": "decision",
+      "label": "Ready 准备发送",
+      "sublabel": "窗口 / STATUS / 节点检查",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "发送闸门"
+    },
+    {
+      "id": "ack",
+      "type": "waiting",
+      "label": "Ack 等待确认",
+      "sublabel": "查 &3-{node}-%，最多 MaxWait 轮",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "等待"
+    },
+    {
+      "id": "dispose",
+      "type": "active",
+      "label": "Dispose 收尾",
+      "sublabel": "STATUS 回包 → None",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "收尾"
+    },
+    {
+      "id": "waitActive",
+      "type": "waiting",
+      "label": "插入窗口满",
+      "sublabel": "active ≥ 10：不插新记录",
+      "lane": "waiting",
+      "col": 0,
+      "tag": "插入闸门"
+    },
+    {
+      "id": "waitInFlight",
+      "type": "waiting",
+      "label": "在途窗口满",
+      "sublabel": "inFlight ≥ 10：不发 COMMENT/STATUS",
+      "lane": "waiting",
+      "col": 1,
+      "tag": "发送闸门"
+    },
+    {
+      "id": "waitNode",
+      "type": "waiting",
+      "label": "节点未就绪 / 投递失败",
+      "sublabel": "STB 默认等待；AllowStandbyDispose=true 时可丢弃（测试）",
+      "lane": "waiting",
+      "col": 2,
+      "tag": "重试"
+    },
+    {
+      "id": "maint",
+      "type": "active",
+      "label": "每 60s 维护",
+      "sublabel": "补查 &3 → 重排队 → 失败标记",
+      "lane": "maint",
+      "col": 0,
+      "yOffset": 100,
+      "tag": "并行"
+    },
+    {
+      "id": "resend",
+      "type": "active",
+      "label": "5 分钟重排队",
+      "sublabel": "只放回待发队列；24 次后失败",
+      "lane": "maint",
+      "col": 2,
+      "yOffset": 100,
+      "tag": "重排队"
+    },
+    {
+      "id": "disposed",
+      "type": "success",
+      "label": "disposed=1 已丢弃",
+      "sublabel": "&3-{node}-% 命中",
+      "lane": "terminal",
+      "col": 0,
+      "tag": "终态"
+    },
+    {
+      "id": "skipped",
+      "type": "neutral",
+      "label": "send=2 跳过",
+      "sublabel": "未知节点 / SkipOnUnknownNode",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "终态"
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "send=3 失败",
+      "sublabel": "24 次仍未丢弃，人工处置",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "终态"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "none-ready",
+      "from": "none",
+      "to": "ready",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "ready-ack",
+      "from": "ready",
+      "to": "ack",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "ack-dispose",
+      "from": "ack",
+      "to": "dispose",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "dispose-none",
+      "from": "dispose",
+      "to": "none",
+      "variant": "default",
+      "route": "bottom-channel",
+      "fromSide": "bottom",
+      "toSide": "bottom"
+    },
+    {
+      "id": "ready-waitActive",
+      "from": "ready",
+      "to": "waitActive",
+      "variant": "security",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "ready-waitInFlight",
+      "from": "ready",
+      "to": "waitInFlight",
+      "variant": "security",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "ready-waitNode",
+      "from": "ready",
+      "to": "waitNode",
+      "variant": "dashed",
+      "route": "drop",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "waitActive-none",
+      "from": "waitActive",
+      "to": "none",
+      "variant": "dashed",
+      "route": "left-channel",
+      "fromSide": "left",
+      "toSide": "left",
+      "channelX": 170
+    },
+    {
+      "id": "waitInFlight-ready",
+      "from": "waitInFlight",
+      "to": "ready",
+      "variant": "dashed",
+      "route": "drop",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "waitNode-ready",
+      "from": "waitNode",
+      "to": "ready",
+      "variant": "dashed",
+      "route": "drop",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "ack-disposed",
+      "from": "ack",
+      "to": "disposed",
+      "variant": "emphasis",
+      "route": "right-channel",
+      "fromSide": "right",
+      "toSide": "top",
+      "channelX": 475
+    },
+    {
+      "id": "ready-skipped",
+      "from": "ready",
+      "to": "skipped",
+      "variant": "security",
+      "route": "auto",
+      "fromSide": "left",
+      "toSide": "top",
+      "channelX": 170,
+      "via": [
+        [
+          170,
+          157
+        ],
+        [
+          170,
+          440
+        ],
+        [
+          556,
+          440
+        ],
+        [
+          556,
+          450
+        ]
+      ]
+    },
+    {
+      "id": "maint-resend",
+      "from": "maint",
+      "to": "resend",
+      "variant": "default",
+      "route": "straight",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "maint-disposed",
+      "from": "maint",
+      "to": "disposed",
+      "variant": "emphasis",
+      "route": "left-channel",
+      "fromSide": "left",
+      "toSide": "left",
+      "channelX": 320
+    },
+    {
+      "id": "resend-failed",
+      "from": "resend",
+      "to": "failed",
+      "variant": "security",
+      "route": "right-channel",
+      "fromSide": "right",
+      "toSide": "right",
+      "channelX": 790
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "发送窗口 = 10",
+      "items": [
+        "active = send=0 待发 + send=1 未确认；active≥10 不再插新记录",
+        "inFlight = send=1 且 disposed=0；inFlight≥10 不发任何 COMMENT/STATUS",
+        "有 send=0 时先发（不受 active 闸门阻断），否则 10 条待发会永远卡在 None"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "确认与重排队",
+      "items": [
+        "丢弃是否成功只看 t_sample.t_location 是否变为 &3-{node}-%",
+        "每 60 秒补查（只查库）；每 5 分钟重排队：命中才放回待发队列，不直接发",
+        "重发 24 次仍无 &3 → send=3 失败，释放窗口",
+        "STB 默认等待；AllowStandbyDispose=true 时 STB/Pink 也可丢弃（GTO 始终不允许）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "页面人工处置",
+      "items": [
+        "重新检查：立即查 &3，命中则 disposed=1",
+        "重置：send=0、resend_count=0、checkcount=0，重新入队",
+        "清空：删除 sam_dispose_status 记录（二次确认）"
+      ]
+    }
+  ]
+}

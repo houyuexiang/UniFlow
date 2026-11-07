@@ -8,11 +8,15 @@ public class ConfigService
     private readonly ILogger<ConfigService> _logger;
     private readonly object _lock = new();
 
-    public ConfigService(ILogger<ConfigService> logger)
+    public ConfigService(ILogger<ConfigService> logger, string? filePath = null)
     {
-        _filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+        // filePath 可注入（测试用临时目录隔离），生产默认仍是程序目录下的 appsettings.json
+        _filePath = filePath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
         _logger = logger;
     }
+
+    /// <summary>配置文件绝对路径（/api/config/download 与数据库连接测试都以它为准）。</summary>
+    public string FilePath => _filePath;
 
     public Dictionary<string, object?> ReadAll()
     {
@@ -290,6 +294,77 @@ public class ConfigService
         }
     }
 
+    /// <summary>
+    /// 批量更新：所有变更在**一次读盘 + 一次写盘**内落盘（避免多次写文件造成半写状态）。
+    /// 调用方需先完成全部校验（路径已知 / 值类型合法），本方法只负责写。
+    /// </summary>
+    public bool UpdateBatch(IReadOnlyList<(string Path, object? Value)> changes)
+    {
+        if (changes == null || changes.Count == 0) return true;
+        lock (_lock)
+        {
+            try
+            {
+                var config = ReadAll();
+                foreach (var (jsonPath, value) in changes)
+                {
+                    if (value == null || (value is JsonElement je && je.ValueKind == JsonValueKind.Null))
+                    {
+                        _logger.LogWarning("Batch update rejected: {Path} = null", jsonPath);
+                        return false;
+                    }
+                    // SrmNodeIds 期望为字符串数组，统一格式处理
+                    var v = jsonPath.EndsWith("SrmNodeIds", StringComparison.OrdinalIgnoreCase)
+                        ? NormalizeSrmNodeIds(value)
+                        : value;
+                    // 层级分隔符只认 ':'（.NET 配置约定）；键名可含 '.'（如 Microsoft.Hosting.Lifetime）
+                    var parts = jsonPath.Split(':', StringSplitOptions.RemoveEmptyEntries);
+                    SetNested(config, parts, v);
+                }
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                // 原子写：先写临时文件再替换，避免写一半崩溃导致配置文件损坏
+                var tmp = _filePath + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(config, options));
+                File.Move(tmp, _filePath, overwrite: true);
+                foreach (var (jsonPath, value) in changes)
+                {
+                    // 日志打码：路径含密码相关键时不记录值
+                    var safeValue = jsonPath.Contains("Password", StringComparison.OrdinalIgnoreCase)
+                        || jsonPath.Contains("Pwd", StringComparison.OrdinalIgnoreCase) ? "***" : value;
+                    _logger.LogInformation("Config updated (batch): {Path} = {Value}", jsonPath, safeValue);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Batch update config failed ({Count} changes) - {Msg}", changes.Count, ex.Message);
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 读取已保存配置里的管理密码（WebAdmin:AdminPassword）。
+    /// 空 / 缺失 → 返回 null（调用方应拒绝所有破坏性端点并提示「未配置管理密码」）。
+    /// </summary>
+    public string? ReadAdminPassword()
+    {
+        try
+        {
+            var v = ReadPath("WebAdmin:AdminPassword");
+            if (v == null) return null;
+            // 手工编辑可能带空格/换行 → 去掉首尾空白（避免"看起来一样却鉴权失败"）
+            return v.Value.ValueKind == JsonValueKind.String
+                ? v.Value.GetString()?.Trim()
+                : v.Value.ToString().Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("ReadAdminPassword failed: {Msg}", ex.Message);
+            return null;
+        }
+    }
+
     // 读取单项配置（按 ':' 逐级导航；未命中返回 null）
     public System.Text.Json.JsonElement? ReadPath(string jsonPath)
     {
@@ -300,13 +375,7 @@ public class ConfigService
                 var config = ReadAll();
                 var raw = System.Text.Json.JsonSerializer.Serialize(config);
                 using var doc = System.Text.Json.JsonDocument.Parse(raw);
-                var cur = doc.RootElement;
-                foreach (var seg in jsonPath.Split(':', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (cur.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
-                    if (!cur.TryGetProperty(seg, out cur)) return null;
-                }
-                return cur.Clone();
+                return Navigate(doc.RootElement, jsonPath);
             }
             catch (Exception ex)
             {
@@ -314,6 +383,79 @@ public class ConfigService
                 return null;
             }
         }
+    }
+
+    /// <summary>
+    /// 批量读取多个 path（**只读一次**配置文件，避免批量保存时反复读盘/写盘）。
+    /// 返回 path → 当前值（未命中 → null）。
+    /// <para>
+    /// 单条 path 出错**不影响**其它 path：每条独立 try/catch，
+    /// 避免"一条坏路径把整批当前值置空 → 段节点保护全旁路"。
+    /// </para>
+    /// </summary>
+    public Dictionary<string, System.Text.Json.JsonElement?> ReadPaths(IReadOnlyList<string> paths)
+    {
+        var result = new Dictionary<string, System.Text.Json.JsonElement?>();
+        if (paths == null || paths.Count == 0) return result;
+        lock (_lock)
+        {
+            try
+            {
+                var config = ReadAll();
+                var raw = System.Text.Json.JsonSerializer.Serialize(config);
+                using var doc = System.Text.Json.JsonDocument.Parse(raw);
+                foreach (var p in paths)
+                {
+                    if (result.ContainsKey(p)) continue;
+                    try
+                    {
+                        result[p] = Navigate(doc.RootElement, p);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 单条失败只影响这一条（当前值记为 null = 视为新节点），不拖垮整批
+                        _logger.LogWarning("ReadPaths: path '{Path}' failed - {Msg}", p, ex.Message);
+                        result[p] = null;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("ReadPaths failed ({Count} paths) - {Msg}", paths.Count, ex.Message);
+            }
+        }
+        return result;
+    }
+
+    // 按 ':' 逐级导航；键名大小写不敏感回退（与 SetNested 的"复用既有键名"规则一致：
+    // 写 "logging:loglevel" 时实际覆盖既有的 "Logging"→"LogLevel"，不会新建影子键）。
+    // 注意：TryGetProperty 失败时**不能**用 out 参数覆盖 cur（会变成 Undefined，
+    // 后续 EnumerateObject 抛异常 → 被 catch 吞掉 → 误判为"新节点"→ 段节点保护旁路）。
+    private static System.Text.Json.JsonElement? Navigate(System.Text.Json.JsonElement root, string jsonPath)
+    {
+        // 空路径 = 没有目标节点（不要把整份配置当成"该路径的值"返回）
+        var segments = jsonPath.Split(':', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0) return null;
+
+        var cur = root;
+        foreach (var seg in segments)
+        {
+            if (cur.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+
+            // ① 精确命中
+            if (cur.TryGetProperty(seg, out var exact))
+            {
+                cur = exact;
+                continue;
+            }
+
+            // ② 大小写不敏感回退（cur 仍是当前对象，不会被 default 化）
+            var hit = cur.EnumerateObject()
+                .FirstOrDefault(p => string.Equals(p.Name, seg, StringComparison.OrdinalIgnoreCase));
+            if (hit.Name == null) return null;      // 真·新节点
+            cur = hit.Value;
+        }
+        return cur.Clone();
     }
 
     private static object NormalizeSrmNodeIds(object value)
@@ -337,7 +479,9 @@ public class ConfigService
             // 大小写不敏感查找既有键：命中则复用其实际键名（防 ip/Ip 影子键 → binder 重启抛 FormatException）
             var key = FindKeyIgnoreCase(dict, parts[i]);
             if (key == null) key = parts[i];
-            var existing = dict[key];
+            // TryGetValue：中间节点不存在时按"新建"处理（原实现用索引器会抛 KeyNotFound，
+            // 导致 PUT /api/config 写新路径时 500 —— 批量保存同样受影响）
+            var existing = dict.TryGetValue(key, out var ev) ? ev : null;
             var isContainer = existing is Dictionary<string, object?>
                 || (existing is JsonElement jeObj && jeObj.ValueKind == JsonValueKind.Object);
             if (!isContainer)

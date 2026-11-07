@@ -3,7 +3,7 @@
 #
 # 用法：
 #   APP_SETTINGS=/path/to/site-appsettings.json ./deploy/package.sh
-#   VERSION=1.0.6.5 OUT=/path/out ./deploy/package.sh
+#   VERSION=1.0.6.6 OUT=/path/out ./deploy/package.sh
 #
 # 环境变量：
 #   VERSION       覆盖版本号（默认取 UniFlow.csproj 的 <Version>）

@@ -39,7 +39,7 @@ UniFlow 通过 TCP Socket 与 Siemens Aptio 自动化流水线系统通信。
 
 ```
 格式: COMMENT S{cmd}^{barcode}\{action}^S\r\n
-响应: ACK...\r\n
+响应: 无（Dream 不回复；写成功 = 已投递）
 ```
 
 | Action | 命令码 | 说明 |
@@ -55,9 +55,19 @@ UniFlow 通过 TCP Socket 与 Siemens Aptio 自动化流水线系统通信。
 说明: 通过 Aptio GUI 消息取消指定测试
 ```
 
-##### ACK — 确认响应
+##### 确认口径 — 没有 ACK
 
-所有成功执行的命令返回以 `ACK` 开头的响应。
+**Host LIS 发出的 `COMMENT S002`（TRASH / DELIVER）与 `ORDER` 没有 ACK 响应。**
+
+- 依据厂商手册 DCAU-H00.816.12.01.02.pdf 第 498 页 §8.59：`ACK` / `NAK` 是 **Dream→GUI 的通知**，
+  只对应 `ADVANCED-CONFIG-CHANGE`、`CLEAR-TUBES`、`COMMENT I021~I024` 这 **6 条 GUI 命令**，
+  与 Host LIS 的 COMMENT / ORDER 无关；§9.3：`COMMENT S002` 没有任何回复/ACK 定义。
+- 因此成功判定口径是「**写成功 = 已投递**」：socket 写入并 Flush 成功即视为投递成功
+  （传输层返回标记 `OK:SENT`），**不要**用「回复是否以 ACK 开头」判断成败。
+- **丢弃是否真的成功**由数据库判定：`t_sample.t_location` 变为 `&3-{node}-%` 即视为已丢弃，
+  等待 `MaxWaitDiscardCount` 个循环确认；另有每 60 秒一次的补查
+  （复查 `send=1 AND disposed=0`，命中即置 `disposed=1`）。
+- 唯一期待回复的命令是 `STATUS-REQUEST 1`（Dream 回 STATUS 状态行），用于探测连接是否可用。
 
 ---
 
@@ -147,7 +157,9 @@ public interface IAptioSocketClient
     int Port { get; set; }
     bool Connected { get; }
     Task ConnectAsync(CancellationToken ct = default);
-    Task<string?> SendAndReceiveAsync(string command, CancellationToken ct = default);
+    // 业务命令（COMMENT / ORDER）写成功即返回 "OK:SENT"（已投递，无 ACK）；
+    // STATUS-REQUEST 返回 STATUS 回复行或 null；1h 超时返回 null；写失败抛异常。
+    Task<string?> SendAsync(string command, CancellationToken ct = default);
     void Disconnect();
 }
 ```
@@ -169,6 +181,27 @@ public interface IDisposeDatabaseService
     Task<int> GetCheckCountAsync(string barcode);
     Task DeleteUnsendAsync();
     Task DeleteHistoryAsync();
+    // 补查（轮转窗口）：只查 ID > afterId 的一批；返回 (命中数, 本批最大 ID)，
+    // LastId=0 表示本轮查完 → 调用方把游标归零，下一轮从头开始
+    Task<(int Hits, long LastId)> RecheckPendingDisposalsAsync(int max = 200, long afterId = 0);
+    // 重发计数字段（sam_dispose_status.resend_count）是否就绪：建表/迁移成功 → true；
+    // 旧表 ALTER 失败 → false（此时依赖 resend_count 的查询都会失败，Worker 跳过重发/失败标记）
+    bool ResendColumnReady { get; }
+
+    // ===== 队列查询 / 重发 / 失败处置（Web 管理页调用）=====
+    Task<int> CountPendingSendAsync();                                  // send=0 的数量（待发）
+    Task<int> CountPendingAsync();                                       // send=0 或 (send=1 且 disposed=0)
+    Task<int> CountPendingConfirmAsync();                                // send=1 且 disposed=0（待确认）
+    Task<int> CountFailedAsync();                                        // send=3 且 disposed=0（失败）
+    Task<List<DisposeStatus>> GetPendingRecordsAsync(int minResendCount, int limit);
+    Task<List<DisposeStatus>> GetResendCandidatesAsync(string cutoff, int maxResendCount, int limit);
+    Task<List<DisposeStatus>> GetExhaustedCandidatesAsync(int maxResendCount, int limit);
+    Task MarkResendAsync(string barcode);                                // send=1, send_time=now, checkcount=0, resend_count+1（兼容保留；Worker 不再调用）
+    Task<int> RequeueForResendAsync(IReadOnlyCollection<string> barcodes); // 重排队：send=1 & disposed=0 → send=0（不改 send_time、不增 resend_count）
+    Task<int> MarkFailedAsync(IReadOnlyCollection<string> barcodes);    // send=3（失败）
+    Task<int> ResetRecordsAsync(IReadOnlyCollection<string> barcodes);   // send=0, resend_count=0, checkcount=0（重新入队）
+    Task<int> DeleteRecordsAsync(IReadOnlyCollection<string> barcodes);   // 删除记录
+    Task<bool> RecheckRecordAsync(string barcode);                      // 单条复查 → 命中则置 disposed=1
     Task<List<SampleRecord>> GetDeliverRecordsAsync(string deliverTestName, int maxCount);
     Task<List<SampleRecord>> GetPriorityRecordsAsync(string priorityTestName, int maxCount);
     Task SetPriorityDoneAsync(string barcode);
@@ -277,15 +310,107 @@ UniFlow 使用 `Microsoft.Extensions.Configuration` 的 `reloadOnChange: true`�
 
 ### 环境变量覆盖
 
-所有配置项可通过环境变量覆盖，层级用 `__`（双下划线）分隔：
+所有配置项可通过环境变量覆盖，层级用 `__`（双下划线）分隔，**无 `UniFlow` 前缀**
+（应用使用 `WebApplication.CreateBuilder` 的默认环境变量源，未调用 `AddEnvironmentVariables("UniFlow")`，
+带前缀会变成死变量）：
 
 ```bash
-# 覆盖数据库密码
-export UniFlow__Database__Password=newpassword
+# 覆盖数据库密码（配置根 Aptio:Database）
+export Aptio__Database__Password=newpassword
 
 # 覆盖 Aptio IP
-export UniFlow__Aptio__Ip=192.168.1.100
+export Aptio__Ip=192.168.1.100
 
-# 覆盖功能开关
-export UniFlow__Features__DmsAutoOrderEnabled=true
+# 覆盖功能开关（Features 分组结构）
+export Features__Aptio__DisposeSample=true
+export Features__Dms__StatusCorrection=true
 ```
+
+---
+
+## 5. Web 管理 API（管理鉴权）
+
+Web 管理控制台的 HTTP 接口统一在 `/api` 前缀下（默认 `http://<host>:5100`）。
+**破坏性动作**（重启 / 改配置 / 升级 / 清错误 / 删队列 / 下载配置）需要**管理鉴权**。
+
+### 5.1 鉴权流程（每次动作一次，无会话 token）
+
+```
+① GET  /api/auth/challenge        → { "nonce": "<64 hex>", "expiresInSeconds": 60 }   （免鉴权）
+② 前端计算 hash = SHA-256(密码 + nonce)  → 十六进制小写（64 字符，纯 JS 实现）
+③ 请求带两个头：
+      X-Admin-Nonce: <nonce>
+      X-Admin-Hash:  <hash>
+```
+
+后端校验：nonce 存在且未过期（60 秒、一次性、仅存内存）→ 重算 `SHA256.HashData(UTF8(密码 + nonce))` → **常量时间**比较。
+**无论成功失败都消费掉该 nonce**（重放必然失败）；密码与哈希**不写日志**。
+
+| 情况 | 响应 |
+|------|------|
+| 管理密码未配置（`WebAdmin:AdminPassword` 为空） | **403** `{"success":false,"error":"Admin password not configured"}` |
+| 头缺失 / nonce 过期 / 哈希不匹配 | **401** `{"success":false,"error":"Admin authentication failed"}` |
+
+> `WebAdmin:AdminPassword` 默认 `Advia1`，**热生效**（后台改 appsettings.json 即刻生效）。
+> 页面不显示、不可改；`PUT /api/config`、`PUT /api/config/batch` 写该路径一律 400。
+> HTTP 明文环境的局限（哈希不防 MITM、上 HTTPS/限网段的建议）见《配置参考》`WebAdmin` 章。
+
+### 5.2 需要鉴权的端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| PUT | `/api/config` | 单条保存配置 |
+| PUT | `/api/config/batch` | 多字段一次保存（一次请求、一次鉴权） |
+| GET | `/api/config/download` | 下载 appsettings.json **原文**（含明文密码，鉴权后） |
+| POST | `/api/update/upload` | 上传升级包 |
+| POST | `/api/update/apply` | 应用升级 |
+| POST | `/api/restart` | 内部重启（业务宿主重建） |
+| POST | `/api/restart/process` | 进程级重启（Exit(1)，由服务管理器拉起） |
+| DELETE | `/api/errors` | 清空错误记录 |
+| POST | `/api/dispose/pending/reset` | 重排队 |
+| POST | `/api/dispose/pending/delete` | 删除待处置记录 |
+
+### 5.3 免鉴权的端点
+
+`GET /api/health`、`GET /api/health/history`、`GET /api/errors`、`GET /api/errors/summary`、`GET /api/logs/*`、
+`GET /api/config`（**打码**：所有 `Password`/`Pwd` 键 → `"***"`）、`GET /api/dispose/pending`、
+`POST /api/dispose/pending/recheck`、`POST /api/config/test-db`、`GET /api/auth/challenge`、
+`GET /api/version`、`GET /api/restart/status`、`GET /api/update/status`。
+
+### 5.4 新增接口
+
+**GET /api/auth/challenge**（免鉴权）
+
+```json
+{ "nonce": "6f1c…（64 位十六进制小写）", "expiresInSeconds": 60 }
+```
+
+**PUT /api/config/batch**（需鉴权）
+
+```jsonc
+// 请求
+{ "changes": [ { "path": "Aptio:Ip", "value": "192.168.1.10" },
+               { "path": "Aptio:Database:Password", "value": "***" } ] }
+
+// 响应（全部合法才写盘；任一非法 → 400 且一个字段都不写）
+{ "success": true, "count": 1, "skipped": 1,
+  "restart": { "level": "InnerRestart", "message": "Saved. Requires business-worker restart…" } }
+```
+
+- 密码类路径的值为 `"***"` 或空串 → **保持现有值不变**（计入 `skipped`，不计入 `count`）。
+- `WebAdmin:AdminPassword` 不可经 API 写入 → 400。
+
+**POST /api/config/test-db?target=aptio|dms**（免鉴权）
+
+```json
+{ "success": true, "target": "aptio", "elapsedMs": 42, "message": "Connection succeeded" }
+```
+
+- **只测已保存配置**（`Aptio:Database:*` / `DMS:Db*`），不读请求体、不改任何配置；
+- 5 秒连接超时（`OpenAsync` + `PingAsync`）；
+- 失败时 `message` 含错误原因但**不含密码**（密码替换为 `***`）。
+
+**GET /api/config/download**（需鉴权）
+
+- 鉴权通过 → 返回 **appsettings.json 完整原文**（含所有明文密码）；
+- 对照：`GET /api/config`（免鉴权）返回**打码**后的配置。

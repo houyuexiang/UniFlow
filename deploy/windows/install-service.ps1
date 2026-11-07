@@ -4,12 +4,24 @@ param([ValidateSet("install","uninstall","status","docker")][string]$Action = "i
 $ServiceName = "UniFlow"
 $DisplayName = "UniFlow - Laboratory Automation Workflow Service (.NET 10)"
 $Project = "UniFlow"
-$SrcDir = Join-Path $PSScriptRoot "..\src"
-$OutDir = Join-Path $PSScriptRoot "..\publish"
+# 源码目录：<repo>\code\src（本脚本在 <repo>\deploy\windows 下 → 需上两级）
+# 旧写法 "..\src" 指向 <repo>\deploy\src —— 不存在，dotnet publish 必然失败
+$SrcDir = Join-Path $PSScriptRoot "..\..\code\src"
+# 发布输出目录：<repo>\release\publish（与 deploy/build.sh、.gitignore 的 release/publish/ 一致）
+$OutDir = Join-Path $PSScriptRoot "..\..\release\publish"
+$Csproj = Join-Path $SrcDir "$Project\$Project.csproj"
 
 function Publish-Service {
+    if (-not (Test-Path $Csproj)) {
+        Write-Host "Source project not found: $Csproj" -ForegroundColor Red
+        Write-Host "Expected layout: <repo>\code\src\$Project\$Project.csproj" -ForegroundColor Yellow
+        exit 1
+    }
+    if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
     Write-Host "Building $Project for .NET 10..." -ForegroundColor Green
-    & dotnet publish (Join-Path $SrcDir "$Project\$Project.csproj") `
+    Write-Host "  project: $Csproj" -ForegroundColor DarkGray
+    Write-Host "  output : $OutDir" -ForegroundColor DarkGray
+    & dotnet publish $Csproj `
         --configuration Release `
         --runtime win-x64 `
         --self-contained true `

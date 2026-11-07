@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 using UniFlow.Common.Models;
 using UniFlow.Common.Services;
@@ -67,6 +68,18 @@ using UniFlow.WebAdmin.Services;
     }
 }
 
+// 单实例保护（老 Delphi 版用 Mutex；.NET 版此前缺失 → 两个实例会同时抢 Web 端口 / Aptio 连接 / 重复清理数据）
+// 已有实例在跑 → 记日志并退出（不碰任何业务资源）；
+// 互斥体不可用（权限/平台限制）→ 只告警并继续启动（不能因此把服务起不来）
+var instanceGuard = UniFlow.Common.Services.SingleInstanceGuard.TryAcquire(out var instanceStatus, out var instanceError);
+if (instanceStatus == UniFlow.Common.Services.SingleInstanceStatus.AlreadyRunning)
+{
+    Console.WriteLine($"[UniFlow] another instance is already running ({instanceError}) — exiting");
+    return;
+}
+if (instanceGuard == null)
+    Console.WriteLine($"[UniFlow] single-instance guard unavailable ({instanceError}) — continuing without it");
+
 var builder = WebApplication.CreateBuilder(args);
 
 // 升级包上传（~50MB 自包含单文件）需要放宽请求体上限（默认 30MB 会 413）
@@ -102,7 +115,13 @@ builder.Services.AddSingleton<ErrorReporter>();
 builder.Services.AddSingleton<IErrorReporter>(sp => sp.GetRequiredService<ErrorReporter>());
 var dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "uniflow_admin.db");
 builder.Services.AddSingleton(sp => new HealthStore(dbPath, sp.GetRequiredService<ILogger<HealthStore>>(), webCfg.ErrorRetentionDays, sp.GetRequiredService<ErrorReporter>()));
-builder.Services.AddSingleton<ConfigService>();
+builder.Services.AddSingleton(sp => new ConfigService(sp.GetRequiredService<ILogger<ConfigService>>()));
+// 管理鉴权：一次性 nonce + SHA-256(密码+nonce)（每次破坏性动作鉴权一次，无长会话）
+builder.Services.AddSingleton(sp => new AdminAuthService());
+builder.Services.AddSingleton<AdminAuthFilter>();
+// 数据库连通性测试（只测已保存配置）
+builder.Services.AddSingleton<IDatabaseConnectionProbe, MySqlDatabaseConnectionProbe>();
+builder.Services.AddSingleton<DatabaseConnectionTester>();
 builder.Services.AddSingleton<RestartManager>();
 builder.Services.AddHostedService<ErrorCollectorWorker>();
 builder.Services.AddHostedService<HealthCheckWorker>();
@@ -158,19 +177,60 @@ finally
 {
     await restartManager.StopAsync();
 }
+// 保持单实例互斥体存活到进程真正结束（否则可能被 GC 回收 → 锁失效 → 第二个实例能起来）
+GC.KeepAlive(instanceGuard);
 
 // ============================================================
 // 业务服务注册（内部宿主每次重建时重新执行 → 启动期配置全部生效）
 // ============================================================
 public static partial class Program
 {
+    /// <summary>
+    /// 把 appsettings.json 的 "Aptio" 段绑定成 <see cref="AptioConfig"/>。
+    /// <para>
+    /// 陷阱：ConfigurationBinder 对集合是「<b>追加</b>」而不是「覆盖」——
+    /// <c>AptioConfig.SrmNodeIds</c> 的默认值是 <c>["09"]</c>，直接绑定会得到
+    /// <c>["09","09","16"]</c>（配置改成 ["16"] 则得到 ["09","16"]，多出幽灵节点 09）。
+    /// 故先清空默认列表再绑定，保证结果与 appsettings.json 完全一致。
+    /// </para>
+    /// </summary>
+    public static AptioConfig BindAptioConfig(IConfiguration config)
+    {
+        var aptio = new AptioConfig();
+        aptio.SrmNodeIds.Clear();
+        config.GetSection("Aptio").Bind(aptio);
+        return aptio;
+    }
+
+    /// <summary>
+    /// 注册 <see cref="AptioConfig"/> 的选项绑定（供 <c>IOptions</c> / <c>IOptionsMonitor</c> 使用）。
+    /// <para>
+    /// 与 <see cref="BindAptioConfig"/> 同样的理由：先清空 <c>SrmNodeIds</c> 默认值再绑定，
+    /// 否则 options 里会出现配置中不存在的幽灵节点。
+    /// 另外显式注册配置变更令牌，保证 <c>IOptionsMonitor&lt;AptioConfig&gt;</c> 能随
+    /// appsettings.json 变更刷新（<c>Configure&lt;TDep&gt;</c> 本身不提供变更令牌）。
+    /// </para>
+    /// </summary>
+    public static void ConfigureAptioOptions(IServiceCollection services, IConfiguration config)
+    {
+        services.AddSingleton<IConfiguration>(config);
+        services.AddOptions<AptioConfig>()
+            .Configure<IConfiguration>((o, c) =>
+            {
+                o.SrmNodeIds.Clear();
+                c.GetSection("Aptio").Bind(o);
+            });
+        services.AddSingleton<IOptionsChangeTokenSource<AptioConfig>>(
+            new ConfigurationChangeTokenSource<AptioConfig>(config.GetSection("Aptio")));
+    }
+
     public static void RegisterBusinessServices(IServiceCollection services, IConfiguration config, IServiceProvider outer)
     {
         var features = config.GetSection("Features").Get<FeatureConfig>() ?? new();
-        var aptio = config.GetSection("Aptio").Get<AptioConfig>() ?? new();
+        var aptio = BindAptioConfig(config);
 
         services.Configure<FeatureConfig>(config.GetSection("Features"));
-        services.Configure<AptioConfig>(config.GetSection("Aptio"));
+        ConfigureAptioOptions(services, config);
 
         // 共享外壳单例（错误队列/健康存储贯穿内外宿主）
         services.AddSingleton(outer.GetRequiredService<HealthStore>());
@@ -189,7 +249,10 @@ public static partial class Program
         var aptioFactory = new MySqlConnectionFactory(dbCfg);
 
         services.AddSingleton<IDisposeDatabaseService>(sp =>
-            new DisposeDatabaseService(sp.GetRequiredService<ILogger<DisposeDatabaseService>>(), aptioFactory));
+            new DisposeDatabaseService(
+                sp.GetRequiredService<ILogger<DisposeDatabaseService>>(),
+                aptioFactory,
+                sp.GetRequiredService<IOptionsMonitor<AptioConfig>>()));
         services.AddSingleton<AptioCommandService>();
 
         services.AddSingleton<IExportDatabaseService>(sp =>
@@ -276,7 +339,11 @@ public static partial class Program
             services.AddSingleton(dmsCfg);
             var dmsFactory = new MySqlConnectionFactory(dmsCfg.DbHost, dmsCfg.DbPort, dmsCfg.DbName, dmsCfg.DbUser, dmsCfg.DbPassword);
             services.AddSingleton(sp => new DmsDatabaseService(sp.GetRequiredService<ILogger<DmsDatabaseService>>(), dmsFactory, dmsCfg, sp.GetRequiredService<IErrorReporter>()));
-            services.AddSingleton<PitStopMonitorService>();
+            services.AddSingleton<IDmsDatabaseService>(sp => sp.GetRequiredService<DmsDatabaseService>());
+            services.AddSingleton(sp => new PitStopMonitorService(
+                sp.GetRequiredService<ILogger<PitStopMonitorService>>(),
+                sp.GetRequiredService<IDmsDatabaseService>(),
+                sp.GetRequiredService<UniFlow.DMSAutoOrder.Models.DmsOrderConfig>()));
             services.AddSingleton<SampleCleanupService>();
             services.AddSingleton<StatusCorrectionService>();
             services.AddSingleton<EmptyResultCleanupService>();

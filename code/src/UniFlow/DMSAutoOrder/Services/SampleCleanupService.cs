@@ -1,5 +1,4 @@
 using System.Text;
-using Dapper;
 using Microsoft.Extensions.Logging;
 using UniFlow.Common.Models;
 using UniFlow.Common.Services;
@@ -9,7 +8,7 @@ namespace UniFlow.DMSAutoOrder.Services;
 public class SampleCleanupService
 {
     private readonly ILogger<SampleCleanupService> _logger;
-    private readonly DmsDatabaseService _db;
+    private readonly IDmsDatabaseService _db;
     private readonly Models.DmsOrderConfig _config;
     private readonly IAptioSocketClient _aptioSocket;
     private readonly IErrorReporter _errors;
@@ -26,7 +25,7 @@ public class SampleCleanupService
 
     public SampleCleanupService(
         ILogger<SampleCleanupService> logger,
-        DmsDatabaseService db,
+        IDmsDatabaseService db,
         Models.DmsOrderConfig config,
         IAptioSocketClient aptioSocket,
         IErrorReporter errors)
@@ -37,6 +36,12 @@ public class SampleCleanupService
         _aptioSocket = aptioSocket;
         _errors = errors;
     }
+
+    /// <summary>
+    /// 观测用：当前仍在计时的样本 key 集合（key = "{testName}\u0001{sid}"）。
+    /// <para>删除回滚时计时**必须保留**（下一轮重试）；删除成功才移除。</para>
+    /// </summary>
+    public IReadOnlyCollection<string> TrackedTimingKeys => _firstSeenUtc.Keys.ToList();
 
     public async Task ExecuteAsync(CancellationToken ct = default)
     {
@@ -153,13 +158,10 @@ public class SampleCleanupService
             var prefix = testName + "\u0001";
 
             // 查出该测试名下的全部样本（不按时间过滤——超时由 UniFlow 首次检测时间起算）
-            var sql = $"SELECT DISTINCT codsid FROM {_config.DbName}.reqtest " +
-                      $"WHERE codtest = @TestName";
             try
             {
                 var qSw = System.Diagnostics.Stopwatch.StartNew();
-                using var conn = _db.NewConnection();
-                var sids = (await conn.QueryAsync<string>(sql, new { TestName = testName })).ToList();
+                var sids = await _db.GetTriggerSampleIdsAsync(testName);
                 qSw.Stop();
                 _logger.LogDebug("Trigger query for {Test} returned {Count} sid(s) in {Ms}ms",
                     testName, sids.Count, qSw.ElapsedMilliseconds);
@@ -204,13 +206,27 @@ public class SampleCleanupService
                     tTests += step.ElapsedMilliseconds; step.Restart();
                     var affected = await _db.DeleteSampleAsync(sid, oid, _deleteSqlTemplates!);
                     tDel += step.ElapsedMilliseconds; step.Restart();
-                    await SendAptioActionAsync(sid, tests);
-                    tSend += step.ElapsedMilliseconds;
-                    var ageSec = _firstSeenUtc.TryGetValue(prefix + sid, out var fs)
-                        ? (int)(nowUtc - fs).TotalSeconds : 0;
-                    _firstSeenUtc.Remove(prefix + sid);
-                    _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test} after {Age}s, {Rows} row(s)",
-                        sid, oid, testName, ageSec, affected);
+                    if (affected > 0)
+                    {
+                        // 删除确实生效 → 才发 Aptio 联动报文 + 清计时
+                        await SendAptioActionAsync(sid, tests);
+                        tSend += step.ElapsedMilliseconds;
+                        var ageSec = _firstSeenUtc.TryGetValue(prefix + sid, out var fs)
+                            ? (int)(nowUtc - fs).TotalSeconds : 0;
+                        _firstSeenUtc.Remove(prefix + sid);
+                        _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test} after {Age}s, {Rows} row(s)",
+                            sid, oid, testName, ageSec, affected);
+                    }
+                    else
+                    {
+                        // 删除回滚（或本就没有匹配行）→ DMS 行还在：
+                        //   绝不能发 Aptio 报文（否则仪器侧已被取消/完成，而 DMS 数据仍在 → 状态不一致），
+                        //   也**不能**清计时（否则下一轮会重新计时 → 永远到不了超时 → 样本永远不被清理）。
+                        //   保留计时 → 下一轮继续重试删除。
+                        _logger.LogWarning("Trigger delete for {Sid} (oid={Oid}) affected 0 row(s) " +
+                            "(rolled back or no matching rows) — skip Aptio action, keep timing for retry",
+                            sid, oid);
+                    }
                 }
                 dSw.Stop();
                 _logger.LogDebug("Trigger deletion loop for {Test} done in {Ms}ms ({Count} sid(s)) | breakdown: getOid={Oid}ms getTests={Tests}ms delete={Del}ms send={Send}ms",

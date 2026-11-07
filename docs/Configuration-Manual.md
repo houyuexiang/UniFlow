@@ -3,14 +3,17 @@
 ## 顶层配置结构
 
 ```
-Logging/          ← 日志配置
-Features/         ← 功能开关
-Aptio/            ← 基础设施：连接与数据库
-AptioAutoProcess/ ← 核心业务：标本处理
-WorkListCleaners/ ← 工作列表清理器（多实例数组）
-WebAdmin/         ← Web 管理控制台
-DMS/              ← DMS 基础设施与自动工单
+Logging/            ← 日志配置
+Features/           ← 功能开关（分组：Aptio / Immulite / Dms）
+Aptio/              ← 基础设施 + 核心业务（Database / DisposeSample / SrmExport / Delivery / …）
+WorkListCleaners/   ← 工作列表清理器（多实例数组）
+WebAdmin/           ← Web 管理控制台
+DMS/                ← DMS 基础设施与自动工单
 ```
+
+> 旧结构 `AptioAutoProcess/` 与旧平铺根 `Database/`、`Dispose/`、`Export/` 已废弃：
+> 程序读取到旧键时会**一次性自动迁移**到上面的结构。逐字段的权威清单见《配置参考》
+> （docs/CONFIG-REFERENCE.md）。
 
 ---
 
@@ -56,9 +59,20 @@ logs/
 
 | 路径 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `Features:AptioAutoProcess` | boolean | `true` | 启用 Aptio 标本全流程处理（丢弃/递送/优先级/导出） |
-| `Features:ImmuliteWorkOrderClean` | boolean | `false` | 启用 Immulite 工作列表清理 |
-| `Features:DmsAutoOrder` | boolean | `false` | 启用 DMS 自动工单 |
+| `Features:Aptio:DisposeSample` | boolean | `true` | 启用样本丢弃（超期样本丢弃流程） |
+| `Features:Aptio:SrmExport` | boolean | `true` | 启用 SRM 导出 |
+| `Features:Aptio:Delivery` | boolean | `false` | 启用按测试名递送 |
+| `Features:Aptio:DeliveryFile` | boolean | `false` | 启用清单文件递送 |
+| `Features:Aptio:Priority` | boolean | `false` | 启用优先级标记 |
+| `Features:Aptio:TestNameDispose` | boolean | `false` | 启用按测试名丢弃 |
+| `Features:Immulite:WorkListCleaner` | boolean | `false` | 启用 Immulite 工作列表清理 |
+| `Features:Dms:PitStopMonitor` | boolean | `false` | 启用 DMS PitStop 监控 |
+| `Features:Dms:StatusCorrection` | boolean | `false` | 启用 DMS 状态修正 |
+| `Features:Dms:SampleCleanup` | boolean | `false` | 启用 DMS 样本清理 |
+| `Features:Dms:EmptyResultCleanup` | boolean | `false` | 启用 DMS 空结果清理 |
+
+> 旧平铺开关（`Features:AptioAutoProcess` / `Features:ImmuliteWorkOrderClean` / `Features:DmsAutoOrder`）
+> 已废弃，程序读取旧键时一次性自动迁移为上面的分组开关。
 
 ---
 
@@ -79,6 +93,11 @@ logs/
 
 ## AptioAutoProcess — 核心业务
 
+> ⚠️ **本节路径为旧结构**（`AptioAutoProcess:Dispose:*` / `:Deliver:*` / `:Priority:*` / `:Export:*`），
+> 已废弃（程序读取旧键时一次性自动迁移）。当前结构的权威字段清单见《配置参考》：
+> `Aptio:DisposeSample:*`、`Aptio:SrmExport:*`、`Aptio:Delivery:*`、`Aptio:DeliveryFile:*`、
+> `Aptio:Priority:*`、`Aptio:TestNameDispose:*`、`Aptio:BatchScan:*`。
+
 ### Dispose — 定时丢弃
 
 | 路径 | 类型 | 默认值 | 说明 |
@@ -89,11 +108,12 @@ logs/
 | `Dispose:DiscardTimeRange` | string | `"01:30-05:45,3800;..."` | 时间段+阈值，分号分隔多段，详见下方格式说明 |
 | `Dispose:LoopIntervalSeconds` | integer | `3` | 状态机轮询间隔（秒） |
 | `Dispose:MaxWaitDiscardCount` | integer | `2` | 最大等待丢弃确认次数，超限强制丢弃 |
-| `Dispose:MaxOnetimeSelectDiscardCount` | integer | `8` | 单次最多选取丢弃数 |
+| `Dispose:MaxOnetimeSelectDiscardCount` | integer | `10` | 单次最多选取丢弃数（同时是发送窗口：未丢弃总数上限） |
 | `Dispose:AllowSrmErrorCode` | string | `"0000,0F0A,0E59,AAAA"` | 允许的 SRM 错误码，逗号分隔，匹配视为 `0000` |
 | `Dispose:EnableTestNameDispose` | boolean | `false` | 启用按测试名称丢弃 |
 | `Dispose:DisposeTestName` | string | `""` | 按测试名称丢弃时匹配的测试名称 |
 | `Dispose:SkipOnUnknownNode` | boolean | `true` | `true`=标本位置不在配置节点中时跳过, `false`=忽略节点检查继续丢弃 |
+| `Dispose:ResendIntervalMinutes` | integer | `5` | 重排队检查间隔（分钟）：每该分钟检查一次 `send=1` 且未确认丢弃的记录；命中条件（节点 `ON` + 状态 `G/Y` + 错误码在允许列表）时把记录**放回待发队列**（`send=0`），由状态机按发送窗口一条条发送（**不直接下发丢弃命令**）；`STB` 等非 `ON` 状态一律等待；`0`=关闭重排队 |
 
 **CommandType 枚举：**
 
@@ -193,6 +213,10 @@ HH:MM-HH:MM,threshold;HH:MM-HH:MM,threshold;...
 | `WebAdmin:Port` | integer | `5100` | 监听端口 |
 | `WebAdmin:ErrorRetentionDays` | integer | `30` | 错误记录保留天数 |
 | `WebAdmin:HealthCheckIntervalSeconds` | integer | `60` | 健康检查间隔（秒） |
+| `WebAdmin:AdminPassword` | string | `"Advia1"` | **管理密码**（破坏性动作鉴权）。**热生效**，改完立即生效、无需重启；**页面不显示、不可改**，只能后台改 `appsettings.json`；置空 → 破坏性端点一律 403 拒绝 |
+
+> 管理密码的完整口径（鉴权流程、需鉴权端点清单、HTTP 明文下的局限）见《配置参考》`WebAdmin` 章「管理密码」小节。
+> 一句话：**每次破坏性动作鉴权一次**（取一次性 nonce → 算 `SHA-256(密码+nonce)` → 带 `X-Admin-Nonce`/`X-Admin-Hash`），不建 30 分钟会话 token。
 
 ---
 
@@ -234,15 +258,17 @@ TestName1:TimeoutMinutes1;TestName2:TimeoutMinutes2;...
 
 ## 环境变量覆盖
 
-所有配置项可通过环境变量覆盖，路径用 `__`（双下划线）分隔：
+所有配置项可通过环境变量覆盖，路径用 `__`（双下划线）分隔，**无 `UniFlow` 前缀**
+（应用未调用 `AddEnvironmentVariables("UniFlow")`，带前缀会变成死变量）：
 
 ```bash
-# 覆盖数据库密码
-UniFlow__Aptio__Database__Password=newpassword
+# 覆盖数据库密码（配置根 Aptio:Database）
+Aptio__Database__Password=newpassword
 
 # 覆盖 Aptio IP
-UniFlow__Aptio__Ip=192.168.1.100
+Aptio__Ip=192.168.1.100
 
-# 覆盖功能开关
-UniFlow__Features__AptioAutoProcess=true
+# 覆盖功能开关（Features 分组结构）
+Features__Aptio__DisposeSample=true
+Features__Dms__StatusCorrection=true
 ```

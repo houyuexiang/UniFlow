@@ -1,0 +1,12 @@
+{
+  "name": "uniflow-e2e-playwright",
+  "private": true,
+  "version": "1.0.0",
+  "description": "UniFlow WebAdmin Playwright UI+API tests (frozen-copy environment, see README.md)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.0"
+  }
+}

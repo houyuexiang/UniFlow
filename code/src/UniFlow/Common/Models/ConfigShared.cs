@@ -39,7 +39,8 @@ public class AptioConfig
     // 公共配置
     [Restart(RestartLevel.InnerRestart)] public string Ip { get; set; } = "127.0.0.1";
     [Restart(RestartLevel.InnerRestart)] public int Port { get; set; } = 2055;
-    public List<string> SrmNodeIds { get; set; } = new() { "09" };
+    // SRM 节点号（批量丢弃/导出监控的存储模块）：业务宿主启动时绑定 → 改后需重建业务宿主
+    [Restart(RestartLevel.InnerRestart)] public List<string> SrmNodeIds { get; set; } = new() { "09" };
     [Restart(RestartLevel.InnerRestart)] public AptioDatabaseConfig? Database { get; set; }
 
     // 功能分组配置
@@ -81,8 +82,28 @@ public class AptioDisposeSampleConfig
 
     [Restart(RestartLevel.Hot)] public int LoopIntervalSeconds { get; set; } = 3;
     [Restart(RestartLevel.Hot)] public int MaxWaitDiscardCount { get; set; } = 2;
-    [Restart(RestartLevel.Hot)] public int MaxOnetimeSelectDiscardCount { get; set; } = 8;
+    [Restart(RestartLevel.Hot)] public int MaxOnetimeSelectDiscardCount { get; set; } = 10;
     [Restart(RestartLevel.Hot)] public bool SkipOnUnknownNode { get; set; } = true;
+
+    // ===== 测试开关：允许 Stand-by 丢弃 =====
+    // false（默认）= 保持现状：可丢弃 = Mode=="ON" && Status∈{G,Y} && 错误码在允许列表
+    // true            = 额外允许 Mode=="STB"（Stand-by）与 Status=="P"（Pink）参与丢弃判断
+    // GTO / PA / OFF / FR / SH / EXE 始终不允许（与本开关无关）。
+    // 业务含义：STB 不允许进新样本，但允许执行丢弃；本开关只管「是否允许 STB/P 参与丢弃判断」，
+    // 不涉及进样本逻辑。热生效（Hot），现场测试后再决定是否长期开启。
+    [Restart(RestartLevel.Hot)] public bool AllowStandbyDispose { get; set; } = false;
+
+    // ===== 重发 / 失败处置 =====
+    // 重排队检查间隔（分钟）：每该分钟检查一次 send=1 且未确认丢弃的记录；
+    // 命中（节点 ON + 状态 G/Y + 错误码在允许列表）时把记录放回待发队列（send=0），
+    // 由正常状态机按发送窗口一条条下发（本环节绝不直接下发丢弃命令）；0 = 关闭重排队
+    [Restart(RestartLevel.Hot)] public int ResendIntervalMinutes { get; set; } = 5;
+    // 重发上限（次）：单条记录最多重发多少次；超过则标记 send=3（失败，不再自动重发）；0 = 不限
+    [Restart(RestartLevel.Hot)] public int MaxResendCount { get; set; } = 24;
+    // 待处理队列硬上限：send=0 或 (send=1 且 disposed=0) 的记录数上限；0 = 不限；达到上限时不再插入新记录
+    [Restart(RestartLevel.Hot)] public int MaxPendingRecords { get; set; } = 0;
+    // 待处理队列告警阈值：超过该数量打 Warning（每 10 分钟最多一次）；0 = 不告警
+    [Restart(RestartLevel.Hot)] public int PendingWarnThreshold { get; set; } = 1000;
 
     // ===== 统一读取入口 =====
     // 语义：新格式属性 != null 即权威（空数组 = 显式清空/禁用），null 才回退旧格式字符串。
@@ -167,4 +188,11 @@ public class WebAdminConfig
     [Restart(RestartLevel.ProcessRestart)] public int Port { get; set; } = 5100;
     [Restart(RestartLevel.ProcessRestart)] public int ErrorRetentionDays { get; set; } = 30;
     [Restart(RestartLevel.ProcessRestart)] public int HealthCheckIntervalSeconds { get; set; } = 60;
+
+    // 管理密码：Web 管理界面**破坏性动作**（重启/改配置/升级/删错误/删队列/下载配置）的一次性鉴权口令。
+    // - 读取时机：热生效（每次动作从 appsettings.json 读，后台改完立即生效，无需重启）；
+    // - 页面**不展示、不可改**：/api/config GET 会把本字段打码成 "***"，API 也不接受写入本字段；
+    // - 只能后台改 appsettings.json 的 WebAdmin:AdminPassword；
+    // - 置空（""）→ 所有破坏性端点拒绝（403 未配置管理密码）。
+    [Restart(RestartLevel.Hot)] public string AdminPassword { get; set; } = "Advia1";
 }

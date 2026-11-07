@@ -191,6 +191,16 @@ public static class RestartLevelResolver
         }
     }
 
+    // 受保护路径：管理密码只能在**后台改 appsettings.json**，不允许经 API 写入
+    //（页面不显示、不可改；API 也必须挡住，否则等于允许页面间接改密码）
+    public static bool IsProtectedPath(string jsonPath)
+        => jsonPath.Equals("WebAdmin:AdminPassword", StringComparison.OrdinalIgnoreCase);
+
+    // 密码类路径：值打码（GET /api/config 返回 "***"）、写入时支持 "***"/"" 保持原值
+    public static bool IsPasswordPath(string jsonPath)
+        => jsonPath.Contains("Password", StringComparison.OrdinalIgnoreCase)
+           || jsonPath.Contains("Pwd", StringComparison.OrdinalIgnoreCase);
+
     // 生效方式的人类可读说明（API 响应用英文，WebUI 显示用前端本地映射）
     public static string Message(RestartLevel level) => level switch
     {

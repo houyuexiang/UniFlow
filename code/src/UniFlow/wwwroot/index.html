@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>UniFlow 管理控制台</title>
+<!-- 空 data URI favicon：消除每次加载的 /favicon.ico 404 console 噪音 -->
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -22,6 +24,7 @@
     <button class="tab active" data-tab="dashboard">仪表盘</button>
     <button class="tab" data-tab="forms">功能配置</button>
     <button class="tab" data-tab="errors">错误日志</button>
+    <button class="tab" data-tab="dispose">丢弃队列</button>
     <button class="tab" data-tab="logs">日志文件</button>
     <button class="tab" data-tab="api">API 说明</button>
   </nav>
@@ -93,6 +96,26 @@
     </section>
 
 
+    <!-- Dispose Queue -->
+    <section id="tab-dispose" class="tab-content">
+      <div class="chart-controls">
+        <label>最低重发次数 <input id="disposeMinResend" type="number" min="0" value="24" style="width:60px;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px"></label>
+        <button class="btn" onclick="loadDisposePending()">刷新</button>
+        <button class="btn" onclick="disposeRecheck(getSelectedBarcodes())">批量重新检查</button>
+        <button class="btn" onclick="disposeReset(getSelectedBarcodes())">批量重置</button>
+        <button class="btn-danger" onclick="disposeDelete(getSelectedBarcodes())">批量清空</button>
+        <span class="config-hint" id="disposeMeta"></span>
+      </div>
+      <div id="disposeError" class="config-hint" style="color:var(--red);margin-bottom:8px;display:none"></div>
+      <table class="data-table" id="disposeTable">
+        <thead><tr>
+          <th><input type="checkbox" id="disposeSelectAll" onchange="disposeSelectAll(this)"></th>
+          <th>条码</th><th>位置</th><th>状态</th><th>重发次数</th><th>检查次数</th><th>发送时间</th><th>操作</th>
+        </tr></thead>
+        <tbody id="disposeBody"><tr><td colspan="8" class="loading">点击「刷新」加载</td></tr></tbody>
+      </table>
+    </section>
+
     <!-- Log Files -->
     <section id="tab-logs" class="tab-content">
       <div class="chart-controls">
@@ -123,7 +146,7 @@
     </section>
     <!-- API Docs -->
     <section id="tab-api" class="tab-content">
-      <div class="config-hint" style="margin-bottom:10px">所有接口均以 <b>/api</b> 为前缀（如 <b>http://服务器:5100/api/health</b>）。支持 GET 请求的接口可直接在浏览器打开。</div>
+      <div class="config-hint" style="margin-bottom:10px">所有接口均以 <b>/api</b> 为前缀（如 <b>http://服务器:5100/api/health</b>）。支持 GET 请求的接口可直接在浏览器打开。<br>标注 <b>Auth required</b> 的端点需先 <b>GET /api/auth/challenge</b> 取一次性 nonce（60 秒、一次一用），再带请求头 <b>X-Admin-Nonce</b> 与 <b>X-Admin-Hash = SHA-256(管理密码+nonce)</b>（小写 hex）。管理密码（WebAdmin:AdminPassword）在后台 appsettings.json 修改，页面不提供修改。</div>
       <table class="data-table" id="apiTable">
         <thead><tr><th style="width:90px">方法</th><th style="width:280px">端点</th><th>说明</th><th style="width:300px">示例 / 参数</th><th style="width:220px">响应示例</th></tr></thead>
         <tbody id="apiBody"></tbody>

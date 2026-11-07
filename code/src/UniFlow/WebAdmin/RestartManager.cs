@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using UniFlow.Common.Services.Logging;
@@ -37,6 +38,10 @@ public class RestartManager
 
     // 最近一次重启失败信息（null=无失败）
     public string? LastFailure { get; private set; }
+
+    // 从内层业务宿主获取服务（重启期间返回 null，调用方应处理）
+    public T? GetInnerService<T>() where T : class
+        => Volatile.Read(ref _inner)?.Services.GetService<T>();
 
     public RestartManager(IServiceProvider outer, UniFlowFileLoggerProvider fileProvider, ILogger<RestartManager> logger)
     {

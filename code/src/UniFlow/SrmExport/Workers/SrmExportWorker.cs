@@ -14,7 +14,9 @@ public class SrmExportWorker : BackgroundService
     private AptioConfig _aptio = new();
     private AptioSrmExportConfig _ec = new();
     private FeatureConfig _features = new();
-    private bool _exportedToday;
+    // 已完成导出的日期（每天只导一次）；null = 当天还没导过
+    // 注意：不再用"now.Hour==0 && now.Minute==0 才复位"的老写法（整点错过一次就永远不导）
+    private DateTime? _lastExportDate;
     private bool _pauseReported;
 
     public SrmExportWorker(
@@ -93,14 +95,7 @@ public class SrmExportWorker : BackgroundService
                     continue;
                 }
 
-                if (!_exportedToday && now.Hour == target.Hour && now.Minute == target.Minute)
-                {
-                    await RunExportAsync(ct);
-                    _exportedToday = true;
-                }
-
-                if (now.Hour == 0 && now.Minute == 0)
-                    _exportedToday = false;
+                await TryExportAsync(now, target, ct);
 
                 try { await _health.RecordHealthAsync("SrmExport", "healthy"); } catch { }
             }
@@ -112,13 +107,49 @@ public class SrmExportWorker : BackgroundService
         }
     }
 
-    private async Task RunExportAsync(CancellationToken ct)
+    /// <summary>
+    /// 一轮"是否该导出"的处理（抽出为 public 以便单测）。
+    /// <para>返回 true = 本轮真的执行了导出；false = 不该导（已导过 / 未到时间）或导出未成功（DB 不可用）。</para>
+    /// </summary>
+    public async Task<bool> TryExportAsync(DateTime now, TimeOnly target, CancellationToken ct = default)
+    {
+        if (!ShouldExport(now, target, _lastExportDate)) return false;
+        // 只有真正跑完导出流程才记"当天已导出"（DB 不可用 → 不记，下一轮重试）
+        if (!await RunExportAsync(ct)) return false;
+        _lastExportDate = now.Date;
+        return true;
+    }
+
+    /// <summary>
+    /// 导出时机判定（抽出为 public static 以便单测）：
+    /// <list type="bullet">
+    /// <item>当天已导出过（lastExportDate 与 now 同一天）→ false（每天只导一次）；</item>
+    /// <item>还没到目标时刻（now &lt; target）→ false；</item>
+    /// <item>已到/超过目标时刻 → true。</item>
+    /// </list>
+    /// <para>
+    /// 历史缺陷（P3）：老口径要求 <c>now.Hour==target.Hour &amp;&amp; now.Minute==target.Minute</c>
+    /// —— 循环延迟 / DB 慢 / 进程重启都可能错过那一分钟 → 当天再也不导。
+    /// 现在用"时间窗 + 每日一次标记"：错过整点当天仍会补，重启后当天也会补。
+    /// </para>
+    /// </summary>
+    public static bool ShouldExport(DateTime now, TimeOnly target, DateTime? lastExportDate)
+    {
+        if (lastExportDate.HasValue && lastExportDate.Value.Date == now.Date) return false;
+        return now.TimeOfDay >= target.ToTimeSpan();
+    }
+
+    /// <summary>
+    /// 执行一次导出。返回 false = 本轮未导出（DB 不可用，调用方**不要**记"当天已导出"，下一轮重试）；
+    /// 返回 true = 导出流程已正常走完（含"当天没有可导出的样本"）。
+    /// </summary>
+    private async Task<bool> RunExportAsync(CancellationToken ct)
     {
         _logger.LogInformation("Starting daily export...");
         if (!await _db.PingAsync())
         {
             _logger.LogWarning("DB unavailable, skipping export");
-            return;
+            return false;
         }
 var allSamples = new List<UniFlow.SrmExport.Models.DisposedSample>();
         foreach (var nodeId in _aptio.SrmNodeIds)
@@ -130,11 +161,12 @@ var allSamples = new List<UniFlow.SrmExport.Models.DisposedSample>();
         if (allSamples.Count == 0)
         {
             _logger.LogInformation("No disposed samples from yesterday");
-            return;
+            return true;
         }
 
         await _export.ExportAsync(allSamples);
         _export.CleanOld(_ec.LogRetentionDays);
+        return true;
     }
 
     private static TimeOnly ParseTimeOnly(string time) =>

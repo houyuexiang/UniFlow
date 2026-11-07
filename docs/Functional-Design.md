@@ -163,6 +163,12 @@ TCP 客户端，连接 Aptio GUI 端口（默认 2055），发送命令并接收
 判断：ON + (G/Y) + (0000或允许错误码) → 就绪
 ```
 
+`Mode` 取值含 `ON`（Automation Map ON，正常处理）与 `STB`（Stand-by，carriers **NOT processed**、
+Automation Map **OFF**，手册 Appendix F）等；默认（测试开关 `AllowStandbyDispose=false`）**只有 `ON` 算就绪**，
+`STB/GTO/PA/OFF/FR/SH/EXE` 一律等待；开启该测试开关后 `STB` 与 Pink(`P`) 也参与丢弃判断，
+但 `GTO/PA/OFF/FR/SH/EXE` **始终不允许**。
+`GetNodeMode` / `DescribeNode` 仅用于日志说明（`mode=STB → wait`），不参与就绪判定。
+
 ### 3.3 WorkTimeChecker
 
 工作时间判断：

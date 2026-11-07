@@ -26,4 +26,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\UniFlow\UniFlow.csproj" />
   </ItemGroup>
+
+  <!-- API 集成测试要在测试进程内起真实 Kestrel（127.0.0.1:0 随机端口），
+       需要 ASP.NET Core 共享框架（不引入 Microsoft.AspNetCore.Mvc.Testing 等外部包）。 -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
 </Project>

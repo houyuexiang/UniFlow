@@ -12,6 +12,9 @@ obj/
 .idea/
 .vscode/
 
+# Local OpenCode workspace (node_modules etc.)
+.opencode/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -23,8 +26,10 @@ logs/
 # Release artifacts
 release/publish/
 
-# 测试运行目录
-run-test/
+# 测试运行目录（Playwright 套件入库，其余运行产物忽略）
+run-test/*
+!run-test/playwright/
+!run-test/playwright/**
 
 # Build outputs
 code/src/**/bin/

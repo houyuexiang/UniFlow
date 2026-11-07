@@ -19,8 +19,11 @@ public static class DefaultConfig
               "CommandType": 0, "CommandName": "view_overtimestoragesample",
               "DiscardRunDate": "1,2,3,4,5,6,7", "DiscardTimeRange": "01:30-05:45,3800;18:00-07:00,7500;",
               "RunDays": null, "TimeRanges": null, "AllowedSrmErrorCodes": null,
-              "LoopIntervalSeconds": 3, "MaxWaitDiscardCount": 2, "MaxOnetimeSelectDiscardCount": 8,
-              "AllowSrmErrorCode": "0000,0F0A,0E59,AAAA", "SkipOnUnknownNode": true
+              "LoopIntervalSeconds": 3, "MaxWaitDiscardCount": 2, "MaxOnetimeSelectDiscardCount": 10,
+              "AllowSrmErrorCode": "0000,0F0A,0E59,AAAA", "SkipOnUnknownNode": true,
+              "AllowStandbyDispose": false,
+              "ResendIntervalMinutes": 5, "MaxResendCount": 24,
+              "MaxPendingRecords": 0, "PendingWarnThreshold": 1000
             },
             "SrmExport": { "ExportTime": "08:30", "LoopIntervalSeconds": 60, "LogRetentionDays": 30, "OutputPath": "DisposeFile" },
             "Delivery": { "TestName": "" },
@@ -30,7 +33,7 @@ public static class DefaultConfig
             "BatchScan": { "LoopIntervalSeconds": 60, "MaxOnetimeScanCount": 500 }
           },
           "WorkListCleaners": [],
-          "WebAdmin": { "Enabled": true, "BindIp": "0.0.0.0", "Port": 5100, "ErrorRetentionDays": 30, "HealthCheckIntervalSeconds": 60 },
+          "WebAdmin": { "Enabled": true, "BindIp": "0.0.0.0", "Port": 5100, "ErrorRetentionDays": 30, "HealthCheckIntervalSeconds": 60, "AdminPassword": "Advia1" },
           "DMS": {
             "Enabled": false, "DbHost": "127.0.0.1", "DbPort": 3306, "DbUser": "root", "DbPassword": "", "DbName": "dms",
             "LoopIntervalSeconds": 60, "PitStop": { "TimeoutMinutes": 1 },

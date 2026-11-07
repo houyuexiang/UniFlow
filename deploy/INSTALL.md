@@ -147,14 +147,26 @@ Get-Service UniFlow       # 状态
 
 ```json
 "Features": {
-  "AptioAutoProcess": true,      // 样本丢弃 + 导出
-  "Delivery": false,             // 标本递送
-  "Priority": false,             // 优先级控制
-  "TestNameDispose": false,      // 按测试名丢弃
-  "ImmuliteWorkOrderClean": false, // WorkListCleaner
-  "DmsAutoOrder": false          // DMS 自动下单
+  "Aptio": {
+    "DisposeSample": true,        // 样本丢弃
+    "SrmExport": true,            // SRM 导出
+    "Delivery": false,             // 标本递送
+    "DeliveryFile": false,         // 清单文件递送
+    "Priority": false,             // 优先级控制
+    "TestNameDispose": false       // 按测试名丢弃
+  },
+  "Immulite": { "WorkListCleaner": false },   // WorkListCleaner
+  "Dms": {
+    "PitStopMonitor": false,       // DMS PitStop 监控
+    "StatusCorrection": false,     // DMS 状态修正
+    "SampleCleanup": false,        // DMS 样本清理
+    "EmptyResultCleanup": false    // DMS 空结果清理
+  }
 }
 ```
+
+> 旧平铺开关（`Features:AptioAutoProcess` / `Features:DmsAutoOrder` / `Features:ImmuliteWorkOrderClean`）
+> 已废弃；程序读取旧键时会**一次性自动迁移**到上面的分组结构。
 
 > Web 管理界面（仪表盘页）可以直接用滑块开关这些功能。
 
@@ -175,7 +187,9 @@ Get-Service UniFlow       # 状态
 }
 ```
 
-### DMS 配置（需先开启 `Features:DmsAutoOrder`）
+> 数据库配置在 **`Aptio:Database`**（旧结构是顶层 `Database`，已废弃）。
+
+### DMS 配置（需先开启 `Features:Dms:*` 对应开关）
 
 ```json
 "DMS": {

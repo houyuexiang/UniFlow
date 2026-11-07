@@ -129,32 +129,50 @@ docker run -d --name uniflow \
     -v /path/to/appsettings.json:/app/appsettings.json:ro \
     -v uniflow_logs:/app/logs \
     -v uniflow_db:/app/uniflow_admin.db \
-    -e UniFlow__Database__Host=192.168.1.200 \
-    -e UniFlow__Database__Password=your_password \
-    -e UniFlow__Aptio__Ip=192.168.1.200 \
+    -e Aptio__Database__Host=192.168.1.200 \
+    -e Aptio__Database__Password=your_password \
+    -e Aptio__Ip=192.168.1.200 \
     uniflow:latest
 
 # 访问 Web 管理控制台
 # http://localhost:5100
 ```
 
-**Docker 环境变量覆盖**：
+**Docker 环境变量覆盖**（配置路径用 `__` 分隔，**无 `UniFlow` 前缀**——应用未调用 `AddEnvironmentVariables("UniFlow")`，带前缀会变成死变量）：
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| `UniFlow__Database__Host` | mysql | MySQL 地址 |
-| `UniFlow__Database__Port` | 3306 | MySQL 端口 |
-| `UniFlow__Database__User` | root | 数据库用户 |
-| `UniFlow__Database__Password` | root | 数据库密码 |
-| `UniFlow__Database__Database` | flexlab | 数据库名 |
-| `UniFlow__Aptio__Ip` | 127.0.0.1 | Aptio 服务器地址 |
-| `UniFlow__WebAdmin__BindIp` | 0.0.0.0 | Web 管理绑定地址 |
+| `Aptio__Database__Host` | mysql | MySQL 地址（配置根 `Aptio:Database:Host`） |
+| `Aptio__Database__Port` | 3306 | MySQL 端口 |
+| `Aptio__Database__User` | root | 数据库用户 |
+| `Aptio__Database__Password` | root | 数据库密码 |
+| `Aptio__Database__Database` | flexlab | 数据库名 |
+| `Aptio__Ip` | 127.0.0.1 | Aptio 服务器地址 |
+| `Aptio__Port` | 2055 | Aptio 端口 |
+| `Features__Aptio__DisposeSample` | true | 启用样本丢弃 |
+| `Features__Aptio__SrmExport` | true | 启用 SRM 导出 |
+| `Features__Aptio__Delivery` | false | 启用标本递送 |
+| `Features__Aptio__DeliveryFile` | false | 启用清单文件递送 |
+| `Features__Aptio__Priority` | false | 启用优先级标记 |
+| `Features__Aptio__TestNameDispose` | false | 启用按测试名丢弃 |
+| `WebAdmin__BindIp` | 0.0.0.0 | Web 管理绑定地址 |
+| `WebAdmin__Port` | 5100 | Web 管理端口 |
+
+> ⚠️ 旧写法 `UniFlow__Database__*` / `UniFlow__Aptio__*` 是**死变量**（既多了前缀，根也不对），
+> 已于 `deploy/docker-compose.yml` 中清除；旧平铺根 `Database`/`Dispose`/`Export` 也已从
+> `deploy/appsettings.docker.json` 删除（现结构见《配置参考》）。
 
 ---
 
 ## 4. 配置文件
 
 所有配置在 `appsettings.json`，部署后直接编辑重启服务即可。
+
+> **首次部署请立刻改管理密码**：Web 管理界面的破坏性动作（重启 / 改配置 / 升级 / 清错误 / 删队列 / 下载配置）
+> 需要管理鉴权，口令取自 `WebAdmin:AdminPassword`（默认 `Advia1`）。
+> **只能后台改 `appsettings.json`**（页面不显示、不可改），改完**立即生效、无需重启**（热生效）。
+> 置空（`""`）则所有破坏性端点一律拒绝（403「未配置管理密码」）。
+> 完整口径见《配置参考》`WebAdmin` 章「管理密码」小节。
 
 ### 4.1 完整配置模板
 
@@ -199,8 +217,10 @@ docker run -d --name uniflow \
     "DiscardTimeRange": "01:30-05:45,3800;",
     "LoopIntervalSeconds": 3,
     "MaxWaitDiscardCount": 2,
-    "MaxOnetimeSelectDiscardCount": 8,
+    "MaxOnetimeSelectDiscardCount": 10,
     "AllowSrmErrorCode": "0000,0F0A,0E59,AAAA",
+    "ResendIntervalMinutes": 5,
+    "MaxResendCount": 24,
     "EnableDeliver": false,
     "DeliverTestName": "",
     "EnableUpdatePriority": false,
