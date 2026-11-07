@@ -473,3 +473,365 @@ test.describe('UI-8 XSS 消毒与鉴权交互回归', () => {
     expect(faviconReqs, '不应再请求 /favicon.ico').toEqual([]);
   });
 });
+
+// UI-9 M-07 XSS 引号/属性注入 + 健康/错误消息的独立红闸门（维护单 2026-11-07 M-07，P3）
+// 现有 UI-8 只覆盖 dispose 队列的「标签注入」；本组补齐三类此前无独立回归的攻击面，
+// 并保证以下三类产品回退都能让用例变红：
+//   ① 去掉/削弱 escapeHtml（& < > " ' 完整转义） → <img onerror> 注入执行；
+//   ② 去掉引号转义 / 类名白名单过滤（class="level-*" / class="card *" 属性逃逸）；
+//   ③ 把行内操作按钮的事件委托退回内联 onclick（可被条码在 JS 字符串里逃逸）；
+//   ④ 去掉 escapeHtml 的**引号**转义 → 属性上下文（app.js:481 startEdit 的 value="..."、
+//      以及本组第 6 条直接拼进 value/class 的 innerHTML）属性被提前闭合、逃逸出 on* 属性。
+//      （UI-1~8 与本组 1~3 条的 payload 都在文本上下文里，去掉引号转义仍是绿的 —— 本组第 5、6 条专补这个缺口。）
+// 全部用 page.route + fulfill mock（pathname predicate），不依赖真实 DB/config；基线 Features 全 false。
+test.describe('UI-9 M-07 XSS 引号/属性注入与消息转义红闸门', () => {
+  // 统计 body 内所有以 on 开头的「内联事件属性」（onclick/onerror/onmouseover/onfocus...）。
+  // 注意：JS 里 el.onclick=fn（属性赋值）不会生成 HTML on* 属性，只匹配真实注入的字符串属性。
+  const inlineEventAttrCount = (page, rootSel) => page.evaluate((sel) => {
+    let n = 0;
+    document.querySelectorAll(sel + ', ' + sel + ' *').forEach((el) => {
+      for (const a of el.attributes) if (/^on/i.test(a.name)) n++;
+    });
+    return n;
+  }, rootSel);
+
+  // 1. dispose 队列「属性/引号注入」payload：按文本显示、无 alert、无 pageerror、
+  //    DOM 无新增事件属性/img/script，且行内操作仍走事件委托（回退内联 onclick 即变红）。
+  test('dispose 队列属性/引号注入按文本显示，行内仍走事件委托（M-07）', async ({ page }) => {
+    const BC = 'BC" onmouseover="alert(1)';
+    const LOC = "LOC' onfocus='alert(2)";
+    const st = watch(page, { routePendingMock: true });
+    let alertFired = 0;
+    page.on('dialog', async (d) => { if (d.message().includes('alert')) alertFired++; await d.dismiss().catch(() => {}); });
+    await page.route('**/api/dispose/pending**', (route) => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        minResend: 24, count: 1, pendingSend: 1, pendingConfirm: 0, failedTotal: 0,
+        maxResendCount: 24, resendIntervalMinutes: 5, windowSize: 10, windowFull: false,
+        items: [{
+          barcode: BC, location: LOC, send: 3, resendCount: '9" onmouseover="alert(3)',
+          checkcount: "1' onfocus='alert(4)", sendTime: '2026-11-07 00:00:00',
+        }],
+      }),
+    }));
+    await page.goto('/');
+    await openTab(page, 'dispose');
+    const firstRow = page.locator('#disposeBody tr').first();
+    await expect(firstRow).toBeVisible({ timeout: 10_000 });
+    // 条码/位置/重排队次数/检查次数（全部 escapeHtml）按原始字面量文本显示
+    await expect(page.locator('#disposeBody td').nth(1)).toHaveText(BC);
+    await expect(page.locator('#disposeBody td').nth(2)).toHaveText(LOC);
+    await expect(page.locator('#disposeBody td').nth(4)).toContainText('9" onmouseover="alert(3)');
+    await expect(page.locator('#disposeBody td').nth(5)).toContainText("1' onfocus='alert(4)");
+    // payload 未生成任何 DOM 元素/事件属性
+    expect(await page.locator('#disposeBody img').count(), '条码属性注入不得生成 img').toBe(0);
+    expect(await page.locator('#disposeBody script').count(), '不得生成 script').toBe(0);
+    expect(await inlineEventAttrCount(page, '#disposeBody'), 'disposeBody 不得出现任何 on* 事件属性').toBe(0);
+    // 事件委托未被退回内联 onclick：无任何 [onclick]，操作按钮带 data-act；
+    // 委托按 data-i 取回原始条码进 recheck 请求体（不被 HTML/JS 转义截断）
+    expect(await page.locator('#disposeBody [onclick]').count(), '行内不得有内联 onclick 属性').toBe(0);
+    expect(await page.locator('#disposeBody button.dispose-act[data-act]').count()).toBeGreaterThanOrEqual(3);
+    const bodyPromise = page.waitForRequest(
+      (rq) => rq.url().includes('/api/dispose/pending/recheck') && rq.method() === 'POST', { timeout: 8_000 });
+    await page.locator('#disposeBody button.dispose-act[data-act="recheck"]').first().click();
+    const rq = await bodyPromise;
+    expect(JSON.parse(rq.postData() || '{}').barcodes, '委托须原样取回带引号的条码').toEqual([BC]);
+    expect(alertFired, '属性注入 payload 不得触发 alert').toBe(0);
+    expect(st.pageErrors, 'pageerror: ' + st.pageErrors.join('\n')).toEqual([]);
+  });
+
+  // 2. 健康卡片（/api/health）message 含 HTML + 引号 payload：按文本显示、无脚本执行。
+  //    message 所在 status 用 'degraded'：此时第 211 行的「功能未启用」覆盖分支不触发，
+  //    即使基线 Features 全 false，mock 的 message 也会原样进入卡片（无需 mock /api/config）。
+  test('健康卡片 message 含 HTML/引号按文本显示，无脚本执行（M-07）', async ({ page }) => {
+    const MSG = '<img src=x onerror=alert(1)> "q1" \'q2\'';
+    const st = watch(page);
+    let alertFired = 0;
+    page.on('dialog', async (d) => { if (d.message().includes('alert')) alertFired++; await d.dismiss().catch(() => {}); });
+    await page.route((u) => u.pathname === '/api/health', (route) => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        status: 'degraded',
+        modules: { DisposeSample: { status: 'degraded', timestamp: '2026-11-07 10:00:00', message: MSG } },
+        summary: { healthy: 0, degraded: 1, down: 0 },
+      }),
+    }));
+    await page.goto('/');
+    // 定位显示该 payload 的卡片（DisposeSample 卡片，meta 含模块名 + payload 文本）
+    const card = page.locator('#healthCards .card', { hasText: MSG }).first();
+    await expect(card).toBeVisible({ timeout: 10_000 });
+    // payload 作为纯文本显示（含原始 < > " ' 字面量）
+    await expect(card.locator('.meta')).toContainText(MSG);
+    // 未生成任何 DOM 元素/事件属性（escapeHtml 生效）
+    expect(await page.locator('#healthCards img').count(), 'message 不得生成 img').toBe(0);
+    expect(await page.locator('#healthCards script').count(), 'message 不得生成 script').toBe(0);
+    expect(await inlineEventAttrCount(page, '#healthCards'), 'healthCards 不得出现任何 on* 事件属性').toBe(0);
+    expect(alertFired, 'message payload 不得触发 alert').toBe(0);
+    expect(st.pageErrors, 'pageerror: ' + st.pageErrors.join('\n')).toEqual([]);
+  });
+
+  // 3. 错误列表（/api/errors）module/level/timestamp/message 含 HTML + 引号 payload：
+  //    message/module/timestamp 经 escapeHtml 按文本显示；level 经白名单过滤进 class 属性，
+  //    若去掉 class 过滤/引号转义，level 的 x" onmouseover="..." 会逃逸成属性并被检测到（红闸门）。
+  test('错误列表 module/level/timestamp/message 含 HTML/引号按文本显示，不逃逸属性（M-07）', async ({ page }) => {
+    const MSG = '<img src=x onerror=alert(1)> "e"';
+    const TS = '2026-11-07"T" onmouseover="alert(5)';
+    const MOD = 'Mod" onmouseover="alert(6)';
+    const LVL = 'x" onmouseover="alert(7)';
+    const st = watch(page);
+    let alertFired = 0;
+    page.on('dialog', async (d) => { if (d.message().includes('alert')) alertFired++; await d.dismiss().catch(() => {}); });
+    await page.route((u) => u.pathname === '/api/errors', (route) => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify([
+        { id: 1, timestamp: TS, module: MOD, level: 'ERROR', message: MSG },
+        { id: 2, timestamp: '2026-11-07 10:00:00', module: 'DisposeSample', level: LVL, message: 'plain message' },
+      ]),
+    }));
+    await page.route((u) => u.pathname === '/api/errors/summary', (route) => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ byModule: [{ module: 'Summary" onmouseover="alert(8)', count: 2 }] }),
+    }));
+    await page.goto('/');
+    await openTab(page, 'errors');
+    const firstRow = page.locator('#errorBody tr').first();
+    await expect(firstRow).toBeVisible({ timeout: 10_000 });
+    // message / module / timestamp（全部 escapeHtml）按原始字面量文本显示
+    await expect(page.locator('#errorBody td').nth(0)).toHaveText(TS);
+    await expect(page.locator('#errorBody td').nth(1)).toHaveText(MOD);
+    await expect(page.locator('#errorBody td').nth(3)).toContainText(MSG);
+    // 任何错误单元格都没有把 payload 变成真实元素/事件属性
+    expect(await page.locator('#errorBody img').count(), '错误消息不得生成 img').toBe(0);
+    expect(await page.locator('#errorBody script').count(), '错误消息不得生成 script').toBe(0);
+    expect(await inlineEventAttrCount(page, '#errorTable'), 'errorTable 不得出现任何 on* 事件属性').toBe(0);
+    // 级别白名单过滤：带 class 的单元格 class 必须整体为 ^level-[A-Za-z]*$
+    // （payload 里的引号/空格/等号被过滤掉；若去掉过滤，class 会变成 level-x" onmouseover="..."
+    //  → 既违反该正则、又新增 onmouseover 事件属性，两处都会让本用例变红）
+    const badLevelClass = await page.evaluate(() => {
+      let n = 0;
+      document.querySelectorAll('#errorBody td').forEach((td) => {
+        const c = td.getAttribute('class');
+        if (c === null) return;                 // 无 class 的单元格（ts/module/message）跳过
+        if (!/^level-[A-Za-z]*$/.test(c)) n++;  // 含引号/空格/等号即视为逃逸
+      });
+      return n;
+    });
+    expect(badLevelClass, '级别 class 必须是纯 level-<字母>，不得属性逃逸').toBe(0);
+    // 错误摘要（summary.byModule 亦 escapeHtml）按文本显示
+    const summary = page.locator('#errorSummary');
+    await expect(summary).toContainText('Summary" onmouseover="alert(8)');
+    expect(await summary.locator('img').count(), '摘要不得生成 img').toBe(0);
+    expect(await inlineEventAttrCount(page, '#errorSummary'), '摘要不得出现 on* 事件属性').toBe(0);
+    expect(alertFired, '错误 payload 不得触发 alert').toBe(0);
+    expect(st.pageErrors, 'pageerror: ' + st.pageErrors.join('\n')).toEqual([]);
+  });
+
+  // 4. 多事件类型属性注入（onerror/onload/onmouseover）经事件属性计数断言捕获：
+  //    去掉 escapeHtml 的标签转义 → <img>/<svg> 生成并带 on* 属性 → 计数 > 0 → 红。
+  test('多事件类型标签注入（onerror/onload/onmouseover）被 escapeHtml 全部拦截（M-07）', async ({ page }) => {
+    const MSGS = ['<img src=x onerror=alert(1)>', '<svg onload=alert(2)>', '<a onmouseover="alert(3)">m</a>'];
+    const st = watch(page);
+    let alertFired = 0;
+    page.on('dialog', async (d) => { if (d.message().includes('alert')) alertFired++; await d.dismiss().catch(() => {}); });
+    await page.route((u) => u.pathname === '/api/errors', (route) => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify(MSGS.map((m, i) => ({ id: i + 1, timestamp: 't', module: 'm', level: 'ERROR', message: m }))),
+    }));
+    await page.route((u) => u.pathname === '/api/errors/summary', (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify({ byModule: [] }),
+    }));
+    await page.goto('/');
+    await openTab(page, 'errors');
+    await expect(page.locator('#errorBody tr').first()).toBeVisible({ timeout: 10_000 });
+    expect(await page.locator('#errorBody tr').count(), '三条错误都要渲染').toBe(3);
+    // 三条 payload 都按文本显示（escapeHtml 生效）
+    for (const m of MSGS) await expect(page.locator('#errorBody')).toContainText(m);
+    // 无任何注入元素、无任何 on* 事件属性
+    expect(await page.locator('#errorBody img').count(), '<img> 不得被执行').toBe(0);
+    expect(await page.locator('#errorBody svg').count(), '<svg> 不得被执行').toBe(0);
+    expect(await page.locator('#errorBody a').count(), '<a> 不得被执行').toBe(0);
+    expect(await inlineEventAttrCount(page, '#errorTable'), 'errorTable 不得出现任何 on* 事件属性').toBe(0);
+    expect(alertFired, '多事件 payload 不得触发 alert').toBe(0);
+    expect(st.pageErrors, 'pageerror: ' + st.pageErrors.join('\n')).toEqual([]);
+  });
+
+  // 5. **真正的属性上下文**（此前 UI-9 的缺口）：payload 进 `value="..."` 属性内部。
+  //    产品里唯一的属性拼接点 = app.js:481 `startEdit()`：
+  //        html = '<input type="text" value="' + escapeHtml(...) + '">'
+  //    （「配置管理」页签已从 index.html 移除（app.js:358-360 configTree 容器不存在），
+  //      表单 renderControl 走 DOM 属性赋值 app.js:1055 天然安全 → 无法靠点 UI 触发属性逃逸，
+  //      故按工单允许的方式：/api/config mock 让 payload 经真实渲染链进表单 + 页面内直接调用
+  //      全局 startEdit（app.js:464，等价于 renderConfigNode:449 的调用），断言属性上下文安全。）
+  //    回退「去掉 escapeHtml 的引号转义」时本用例必红：value 属性被 " 提前闭合
+  //    → input 多出 onmouseover/onfocus 属性、或生成 <img onerror> 元素、value 原文被截断。
+  test('配置编辑态 value="..." 属性上下文：引号/标签注入不得逃逸（M-07）', async ({ page }) => {
+    const PAYLOADS = ['x" onmouseover="alert(1)', "y' onfocus='alert(2)", '"><img src=x onerror=alert(3)>'];
+    const FIELD_PATH = 'Aptio:DisposeSample:CommandName';   // FORM_FIELDS 里的 text 字段
+    const FIELD_ID = 'f_Aptio_DisposeSample_CommandName';
+    const st = watch(page, { countMethods: ['GET /api/config'] });
+    let alertFired = 0;
+    page.on('dialog', async (d) => {
+      if (d.type() === 'alert') alertFired++;
+      await d.dismiss().catch(() => {});
+    });
+    // 在真实 /api/config 响应上打补丁（保留原结构/脱敏，避免整包 mock 打崩 renderForms）
+    await page.route((u) => u.pathname === '/api/config', async (route) => {
+      const resp = await route.fetch();
+      let json;
+      try { json = await resp.json(); } catch (e) { json = {}; }
+      const parts = FIELD_PATH.split(':');
+      let o = json;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (typeof o[parts[i]] !== 'object' || o[parts[i]] === null) o[parts[i]] = {};
+        o = o[parts[i]];
+      }
+      o[parts[parts.length - 1]] = PAYLOADS[0];
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(json) });
+    });
+    await page.goto('/');
+    await openTab(page, 'forms');
+    // (a) mock 生效：payload 走真实渲染链进表单输入框（renderControl 用 DOM 属性赋值 → 原文回显）
+    const formInput = page.locator('#' + FIELD_ID);
+    await expect(formInput).toBeVisible({ timeout: 10_000 });
+    await expect(formInput).toHaveValue(PAYLOADS[0], { timeout: 10_000 });
+    expect(await formInput.evaluate((el) =>
+      Array.from(el.attributes).map((a) => a.name.toLowerCase()).filter((n) => /^on/i.test(n))),
+      '表单输入框不得出现 on* 属性').toEqual([]);
+    // (b) 属性上下文主断言：按 renderConfigNode 的方式对每个 payload 进入 startEdit 编辑态
+    const res = await page.evaluate(({ payloads, fieldPath }) => {
+      const out = payloads.map((p) => {
+        const host = document.createElement('div');
+        host.className = 'm07b-host';
+        document.body.appendChild(host);
+        const span = document.createElement('span');
+        span.className = 'config-string';
+        span.textContent = '"' + p + '"';            // 与 app.js:448 的叶子节点渲染一致
+        host.appendChild(span);
+        startEdit(span, fieldPath, p);               // app.js:464 → 内部 escapeHtml + value="..."
+        const input = host.querySelector('input');
+        const bad = [];                              // 非产品自有的 on* 属性（注入产物）
+        host.querySelectorAll('*').forEach((el) => {
+          for (const a of el.attributes) {
+            const t = el.tagName.toLowerCase() + '@' + a.name.toLowerCase();
+            if (/^on/i.test(a.name) && t !== 'button@onclick') bad.push(t + '=' + a.value);
+          }
+        });
+        return {
+          escaped: escapeHtml(p),                    // app.js:558（页面全局函数）
+          inputValue: input ? input.value : null,    // DOM 属性值（应等于原文）
+          attrValue: input ? input.getAttribute('value') : null,
+          attrNames: input ? Array.from(input.attributes).map((a) => a.name.toLowerCase()) : null,
+          injectedAttrs: bad,
+          img: host.querySelectorAll('img').length,
+          script: host.querySelectorAll('script').length,
+        };
+      });
+      document.querySelectorAll('.m07b-host').forEach((h) => h.remove());
+      return out;
+    }, { payloads: PAYLOADS, fieldPath: FIELD_PATH });
+    expect(res.length, '三个 payload 都要跑到编辑态').toBe(3);
+    for (let i = 0; i < res.length; i++) {
+      const r = res[i]; const p = PAYLOADS[i];
+      // 引号必须转义：escapeHtml 输出内不得残留裸 " '（否则属性值可被提前闭合）
+      expect(r.escaped, 'escapeHtml 必须转义引号（payload #' + (i + 1) + '）').not.toContain('"');
+      expect(r.escaped).not.toContain("'");
+      // 按原文显示：属性值与 DOM value 都等于原始字符串（未被引号截断）
+      expect(r.attrValue, 'value 属性必须原样承载 payload（未逃逸）#' + (i + 1)).toBe(p);
+      expect(r.inputValue, '输入框按原文显示 payload #' + (i + 1)).toBe(p);
+      // 没有新增属性：input 只有 type + value；且全宿主无注入型 on* 属性
+      expect(r.attrNames, 'input 只应有 type/value 两个属性 #' + (i + 1)).toEqual(['type', 'value']);
+      expect(r.injectedAttrs, '编辑态不得出现注入的 on* 属性 #' + (i + 1)).toEqual([]);
+      // 没有新增元素
+      expect(r.img, 'payload 不得生成 img #' + (i + 1)).toBe(0);
+      expect(r.script, 'payload 不得生成 script #' + (i + 1)).toBe(0);
+    }
+    await page.waitForTimeout(600);   // 等 onerror/onfocus 这类异步事件冒出来
+    expect(alertFired, '属性注入 payload 不得触发 alert').toBe(0);
+    expect(st.prompts, '进入编辑态不得弹密码').toBe(0);
+    expect(st.reqCounts['GET /api/config'] || 0).toBeGreaterThanOrEqual(1);
+    expect(st.pageErrors, 'pageerror: ' + st.pageErrors.join('\n')).toEqual([]);
+    st.expectClean();
+  });
+
+  // 6. escapeHtml 的最小「属性上下文」闸门（不依赖任何 UI 结构，纯函数 + innerHTML 复检）：
+  //    ① 输出必须把 & < > " ' 五个字符全转义（去掉引号转义 → 断言 2/3 立即红）；
+  //    ② 把结果拼进 value="..." 与 class="..." 两种属性上下文塞给 innerHTML 后：
+  //       属性值必须与原文逐字相等（未被引号提前闭合）、不得多出属性、不得生成 img/script、
+  //       不得出现任何 on* 属性、插入的文本节点必须还原为原文。
+  test('escapeHtml 五字符完整转义，拼入 value/class 属性后无逃逸无 on*（M-07）', async ({ page }) => {
+    const PAYLOADS = [
+      'x" onmouseover="alert(1)',
+      "y' onfocus='alert(2)",
+      '"><img src=x onerror=alert(3)>',
+      "'><svg/onload=alert(4)>",
+      '&lt;script&gt;alert(5)&lt;/script&gt;',
+      '" onmouseover=alert(6) data-x="',
+    ];
+    const st = watch(page);
+    let alertFired = 0;
+    page.on('dialog', async (d) => {
+      if (d.type() === 'alert') alertFired++;
+      await d.dismiss().catch(() => {});
+    });
+    await page.goto('/');
+    const res = await page.evaluate((payloads) => {
+      const raw = String.fromCharCode(34) + 'A' + String.fromCharCode(39);   // "A' —— 故意混排两种引号
+      const out = { items: [], rawQuoteDouble: false, rawQuoteSingle: false, rawOut: escapeHtml(raw), ampRoundTrip: escapeHtml('&lt;a&gt;') };
+      if (out.rawOut.indexOf('"') !== -1) out.rawQuoteDouble = true;
+      if (out.rawOut.indexOf("'") !== -1) out.rawQuoteSingle = true;
+      payloads.forEach((p) => {
+        const e = escapeHtml(p);
+        // 两种属性上下文：value="..."（input）与 class="..."（div）
+        const host = document.createElement('div');
+        host.innerHTML = '<input value="' + e + '"><div class="x ' + e + '" title="' + e + '">' + e + '</div>';
+        const kids = Array.from(host.querySelectorAll('*')).map((el) => ({
+          tag: el.tagName.toLowerCase(),
+          attrs: Array.from(el.attributes).map((a) => a.name.toLowerCase()),
+          onAttrs: Array.from(el.attributes).filter((a) => /^on/i.test(a.name)).map((a) => a.name + '=' + a.value),
+          value: el.tagName === 'INPUT' ? el.getAttribute('value') : null,
+          cls: el.tagName === 'DIV' ? el.getAttribute('class') : null,
+        }));
+        out.items.push({
+          escaped: e,
+          kids,
+          img: host.querySelectorAll('img').length,
+          svg: host.querySelectorAll('svg').length,
+          script: host.querySelectorAll('script').length,
+          text: host.querySelector('div') ? host.querySelector('div').textContent : null,
+        });
+        host.remove();
+      });
+      return out;
+    }, PAYLOADS);
+    // ① 五个字符完整转义（" 与 ' 分别独立断言：删掉任一条 replace 都会红）
+    expect(res.rawQuoteDouble, 'escapeHtml 必须转义双引号（value="..." 会逃逸）').toBe(false);
+    expect(res.rawQuoteSingle, 'escapeHtml 必须转义单引号（value=\'...\' 会逃逸）').toBe(false);
+    expect(res.rawOut).toBe('&quot;A&#39;');
+    expect(res.ampRoundTrip, '& 必须先于 < 转义：&lt;a&gt; 原文须变 &amp;lt;a&amp;gt;').toBe('&amp;lt;a&amp;gt;');
+    for (let i = 0; i < res.items.length; i++) {
+      const it = res.items[i]; const p = PAYLOADS[i]; const e = it.escaped;
+      const where = '#' + (i + 1) + ' [' + p + ']';
+      // & < > 也被转义（&lt; 之类原文须变成 &amp;lt;）
+      expect(e, 'payload 不得残留裸尖括号 ' + where).not.toContain('<');
+      // 属性上下文：属性值逐字等于原文 = 没有被引号提前闭合
+      const input = it.kids.find((k) => k.tag === 'input');
+      const div = it.kids.find((k) => k.tag === 'div');
+      expect(input, 'input 必须存在 ' + where).toBeTruthy();
+      expect(div, 'div 必须存在 ' + where).toBeTruthy();
+      expect(input.value, 'value 属性必须原样承载（未逃逸）' + where).toBe(p);
+      expect(div.cls, 'class 属性必须原样承载（未逃逸）' + where).toBe('x ' + p);
+      expect(div.attrs, 'div 只应有 class/title 两个属性 ' + where).toEqual(['class', 'title']);
+      expect(input.attrs, 'input 只应有 value 一个属性 ' + where).toEqual(['value']);
+      // 无注入元素、无注入事件属性、文本按原文显示
+      expect([it.img, it.svg, it.script], '不得生成 img/svg/script ' + where).toEqual([0, 0, 0]);
+      const onAll = it.kids.reduce((acc, k) => acc.concat(k.onAttrs), []);
+      expect(onAll, '不得出现任何 on* 事件属性 ' + where).toEqual([]);
+      expect(it.text, 'innerHTML 插入后文本节点须还原为原文 ' + where).toBe(p);
+    }
+    await page.waitForTimeout(600);
+    expect(alertFired, '属性上下文 payload 不得触发 alert').toBe(0);
+    expect(st.dialogs, '不应有任何 dialog: ' + JSON.stringify(st.dialogs)).toEqual([]);
+    expect(st.pageErrors, 'pageerror: ' + st.pageErrors.join('\n')).toEqual([]);
+    st.expectClean();
+  });
+});

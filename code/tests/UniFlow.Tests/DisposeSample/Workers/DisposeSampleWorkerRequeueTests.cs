@@ -37,7 +37,9 @@ public class DisposeSampleWorkerRequeueTests : IDisposable
         _healthDbPath = Path.Combine(Path.GetTempPath(), $"uniflow-requeue-{Guid.NewGuid():N}.db");
         _health = new HealthStore(_healthDbPath, NullLogger<HealthStore>.Instance);
         _commands = new AptioCommandService(_socket, NullLogger<AptioCommandService>.Instance);
-        _worker = new DisposeSampleWorker(_logger, _socket, _db, _commands, _decoder, _health);
+        _worker = new DisposeSampleWorker(_logger, _socket, _db, _commands, _decoder, _health,
+            new UniFlow.Tests.Common.TestOptionsMonitor<AptioConfig>(new AptioConfig()),
+            new UniFlow.Tests.Common.TestOptionsMonitor<FeatureConfig>(new FeatureConfig()));
         _worker.LoadConfig(BuildConfig());
 
         _socket.Connected.Returns(true);

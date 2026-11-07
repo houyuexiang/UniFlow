@@ -197,9 +197,47 @@ public static partial class Program
     public static AptioConfig BindAptioConfig(IConfiguration config)
     {
         var aptio = new AptioConfig();
+        BindAptioSection(config, aptio);
+        return aptio;
+    }
+
+    /// <summary>
+    /// "Aptio" 段的<b>唯一</b>绑定实现（<see cref="BindAptioConfig"/> 与
+    /// <see cref="ConfigureAptioOptions"/> 共用）——避免配置绑定出现第二个口径。
+    /// </summary>
+    private static void BindAptioSection(IConfiguration config, AptioConfig aptio)
+    {
+        // 陷阱 1：集合是「追加」不是「覆盖」→ 先清空默认列表（否则出现幽灵节点 09）
         aptio.SrmNodeIds.Clear();
         config.GetSection("Aptio").Bind(aptio);
-        return aptio;
+        NormalizeEmptyArrays(config, aptio);
+    }
+
+    /// <summary>
+    /// 还原「空数组 = 显式清空/禁用」的语义。
+    /// <para>
+    /// 陷阱 2：<b>ConfigurationBinder 无法区分「空数组」与「键不存在」</b>——
+    /// 两者都把可空集合属性留成 <c>null</c>；而 <c>System.Text.Json</c> 会给出
+    /// <b>空集合</b>（非 null）。模型语义（见 <c>AptioDisposeSampleConfig.GetRunDays</c> 等）：
+    /// <c>!= null</c> 即权威，<b>空数组 = 显式清空/禁用</b>，<c>null</c> 才回退旧格式字符串。
+    /// </para>
+    /// <para>
+    /// 不还原的后果：配置写 <c>"RunDays": []</c>（页面提示「全部取消 = 功能不运行」）
+    /// → binder 给 null → 回退旧串 <c>DiscardRunDate</c> → <b>丢弃功能反而被打开</b>（危险）。
+    /// 故：键在配置里存在但绑定结果是 null → 还原成空集合（显式清空）。
+    /// </para>
+    /// </summary>
+    private static void NormalizeEmptyArrays(IConfiguration config, AptioConfig aptio)
+    {
+        var section = config.GetSection("Aptio:DisposeSample");
+
+        // 键存在（配置里写了）但绑定结果是 null → 说明写的是空数组 → 还原为显式空集合
+        if (aptio.DisposeSample.RunDays == null && section.GetSection("RunDays").Exists())
+            aptio.DisposeSample.RunDays = new List<int>();
+        if (aptio.DisposeSample.TimeRanges == null && section.GetSection("TimeRanges").Exists())
+            aptio.DisposeSample.TimeRanges = new List<TimeRangeDto>();
+        if (aptio.DisposeSample.AllowedSrmErrorCodes == null && section.GetSection("AllowedSrmErrorCodes").Exists())
+            aptio.DisposeSample.AllowedSrmErrorCodes = new List<string>();
     }
 
     /// <summary>
@@ -215,11 +253,7 @@ public static partial class Program
     {
         services.AddSingleton<IConfiguration>(config);
         services.AddOptions<AptioConfig>()
-            .Configure<IConfiguration>((o, c) =>
-            {
-                o.SrmNodeIds.Clear();
-                c.GetSection("Aptio").Bind(o);
-            });
+            .Configure<IConfiguration>((o, c) => BindAptioSection(c, o));
         services.AddSingleton<IOptionsChangeTokenSource<AptioConfig>>(
             new ConfigurationChangeTokenSource<AptioConfig>(config.GetSection("Aptio")));
     }

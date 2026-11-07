@@ -99,17 +99,11 @@ public class DmsDatabaseService : IDmsDatabaseService
         => !string.IsNullOrWhiteSpace(name)
            && name.All(ch => char.IsLetterOrDigit(ch) || ch == '_');
 
-    public async Task<List<(string codsid, string codoid)>> GetUnknownPatientOrdersAsync()
-    {
-        using var conn = NewConnection();
-        var sql = $"SELECT r.codsid, r.codoid FROM {_config.DbName}.reqtube r " +
-                  $"WHERE r.codoid IN (SELECT o.codoid FROM {_config.DbName}.orders o, {_config.DbName}.anagpatient a " +
-                  $"WHERE o.codaid = a.codaid AND a.codpid = 'UNKNOWN') " +
-                  $"AND r.codsid IN (SELECT t.codsid FROM {_config.DbName}.reqtest t WHERE t.codtest <> 'UNKN') " +
-                  $"OR r.codoid NOT IN (SELECT o.codoid FROM {_config.DbName}.orders o)";
-        var rows = await conn.QueryAsync<(string, string)>(sql);
-        return rows.ToList();
-    }
+    // 注：原 GetUnknownPatientOrdersAsync（未知病人订单查询）已按维护单 M-01 删除。
+    // 原因：SQL 的 AND/OR 未加括号 → 实际语义是 (A AND B) OR C，
+    //      `codoid NOT IN (...)` 单独成为 OR 分支 → 会把所有"无订单"的 reqtube 全纳入；
+    //      且全仓 0 调用方（旧 DMS 自动下单遗留死代码）→ 保留只会招致误用。
+    //      若将来确需该查询，必须显式加括号并补 SQL 语义测试。
 
     public async Task<int> ExecuteSqlAsync(string sql)
     {

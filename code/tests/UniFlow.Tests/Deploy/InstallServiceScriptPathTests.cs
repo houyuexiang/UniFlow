@@ -82,4 +82,177 @@ public class InstallServiceScriptPathTests
         // 找不到源码时必须明确报错退出（而不是静默继续）
         text.ShouldContain("Source project not found");
     }
+
+    // ===== M-02：install 分支必须在 exe 已存在时**仍然 publish** =====
+    // 历史缺陷：旧脚本 `if (-not (Test-Path $exePath)) { $out = Publish-Service ... }`
+    //           → 目标 exe 已存在就跳过 publish → 现场升级时装的仍是旧二进制。
+
+    /// <summary>取脚本里 "install" 分支的源码块（到下一个分支为止）。</summary>
+    private static string ReadInstallBranch(string scriptPath)
+    {
+        var text = File.ReadAllText(scriptPath);
+        var start = text.IndexOf("\"install\" {", StringComparison.Ordinal);
+        start.ShouldBeGreaterThan(-1, "脚本里应能找到 \"install\" 分支");
+        var end = text.IndexOf("\"uninstall\" {", start, StringComparison.Ordinal);
+        end.ShouldBeGreaterThan(start, "脚本里应能找到 \"uninstall\" 分支（install 分支的结束点）");
+        return text.Substring(start, end - start);
+    }
+
+    [Fact]
+    public void InstallBranch_DoesNot_SkipPublish_When_ExeAlreadyExists()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var branch = ReadInstallBranch(script);
+
+        // 旧缺陷模式必须消失：**不能**存在"exe 不存在才 publish"的守卫
+        // （即：条件判断 Test-Path $exePath 的分支体里调用 Publish-Service）。
+        Regex.IsMatch(branch,
+            @"if\s*\(\s*-not\s*\(\s*Test-Path\s+\$exePath\s*\)\s*\)\s*\{[^}]*Publish-Service",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline)
+            .ShouldBeFalse("install 分支不得再以“exe 是否存在”作为 publish 的前置条件");
+        // publish 调用必须存在
+        branch.ShouldContain("Publish-Service");
+    }
+
+    [Fact]
+    public void InstallBranch_Publishes_ByDefault()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var text = File.ReadAllText(script);
+        var branch = ReadInstallBranch(script);
+
+        // 默认路径（不传 -SkipPublish）走 publish 分支
+        branch.ShouldContain("if ($SkipPublish)");
+        // 非 skip 分支里必须调用 publish
+        var elsePart = branch.Substring(branch.IndexOf("if ($SkipPublish)", StringComparison.Ordinal));
+        elsePart.ShouldContain("$out = Publish-Service");
+        // 脚本必须真的声明了这个开关
+        text.ShouldContain("[switch]$SkipPublish");
+    }
+
+    [Fact]
+    public void SkipPublish_PrintsVersionWarning_AndRefusesWhenBinaryMissing()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var branch = ReadInstallBranch(script);
+
+        // 跳过 publish 时必须打印版本警告（否则等于默默装旧程序）
+        branch.ShouldContain("WARNING: -SkipPublish specified");
+        branch.ShouldContain("binary version");
+        branch.ShouldContain("project version");
+        // 没有已有二进制时必须拒绝（不能装出一个不存在的服务）
+        branch.ShouldContain("no existing binary was found");
+        branch.ShouldContain("exit 1");
+    }
+
+    [Fact]
+    public void InstallBranch_Verifies_PublishedExe_Exists()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var branch = ReadInstallBranch(script);
+
+        // publish 之后必须校验 exe 真的存在（否则 New-Service 会指向空路径）
+        branch.ShouldContain("Publish did not produce the expected executable");
+    }
+
+    // ===== M-02 复核 D3：publish 失败必须被检查并中止安装 =====
+    // 历史缺陷：`& dotnet publish ...` 之后**不检查 $LASTEXITCODE** →
+    //   publish 失败时旧 exe 仍在 → Test-Path $exePath 通过 →
+    //   继续 New-Service → 把**旧二进制**装成服务（还打印 "Published … version"）。
+
+    /// <summary>取脚本里 Publish-Service 函数体（到 switch 之前）。</summary>
+    private static string ReadPublishFunction(string scriptPath)
+    {
+        var text = File.ReadAllText(scriptPath);
+        var start = text.IndexOf("function Publish-Service", StringComparison.Ordinal);
+        start.ShouldBeGreaterThan(-1, "脚本里应能找到 Publish-Service 函数");
+        var end = text.IndexOf("switch ($Action)", start, StringComparison.Ordinal);
+        end.ShouldBeGreaterThan(start, "脚本里应能找到 switch ($Action)（函数体的结束点）");
+        return text.Substring(start, end - start);
+    }
+
+    /// <summary>取 "if (cond) { ... }" 的花括号块（含首尾花括号，按花括号配平）。</summary>
+    private static string ReadBraceBlock(string text, int openBraceIndex)
+    {
+        var depth = 0;
+        for (var i = openBraceIndex; i < text.Length; i++)
+        {
+            if (text[i] == '{') depth++;
+            else if (text[i] == '}')
+            {
+                depth--;
+                if (depth == 0) return text.Substring(openBraceIndex, i - openBraceIndex + 1);
+            }
+        }
+        throw new InvalidOperationException("花括号块没有闭合");
+    }
+
+    /// <summary>取 publish 失败分支（"$publishExitCode -ne 0" 那个 if 的花括号块）。</summary>
+    private static string ReadPublishFailureBlock(string scriptPath)
+    {
+        var fn = ReadPublishFunction(scriptPath);
+        var condIdx = fn.IndexOf("$publishExitCode -ne 0", StringComparison.Ordinal);
+        condIdx.ShouldBeGreaterThan(-1, "脚本里应能找到 publish 退出码判断");
+        var open = fn.IndexOf('{', condIdx);
+        open.ShouldBeGreaterThan(-1, "退出码判断后应有花括号块");
+        return ReadBraceBlock(fn, open);
+    }
+
+    [Fact]
+    public void PublishService_Checks_LastExitCode_AndAbortsOnFailure()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var fn = ReadPublishFunction(script);
+
+        // 必须读 $LASTEXITCODE 并对非零退出码做判断
+        fn.ShouldContain("$LASTEXITCODE");
+        Regex.IsMatch(fn, @"if\s*\(\s*\$publishExitCode\s*-ne\s*0\s*\)", RegexOptions.IgnoreCase)
+            .ShouldBeTrue("publish 后必须判断退出码（旧实现不检查 $LASTEXITCODE → publish 失败也继续装旧二进制）");
+
+        // 失败分支必须以非零退出结束（不能只打个 warning 就继续）
+        var failBlock = ReadPublishFailureBlock(script);
+        failBlock.ShouldContain("exit 1");
+        failBlock.ShouldContain("FAILED");
+    }
+
+    [Fact]
+    public void PublishFailure_Cannot_Reach_NewService_Or_StartService()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var failBlock = ReadPublishFailureBlock(script);
+
+        // 失败分支**自己**必须 exit 1（否则脚本会带着失败继续往下装服务）
+        failBlock.ShouldContain("exit 1");
+        // 失败分支里不得出现装服务/起服务的动作
+        failBlock.ShouldNotContain("New-Service");
+        failBlock.ShouldNotContain("Start-Service");
+        failBlock.ShouldNotContain("sc.exe failure");
+    }
+
+    [Fact]
+    public void PublishService_Publishes_To_StagingDir_Not_The_InstallDir()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var fn = ReadPublishFunction(script);
+
+        // publish 必须落到**临时目录**：失败时不会覆盖正式目录里的旧 exe
+        fn.ShouldContain(".staging");
+        fn.ShouldContain("-o $stagingDir");
+        fn.ShouldNotContain("-o (Join-Path $OutDir $Project)");
+    }
+
+    [Fact]
+    public void InstallBranch_Installs_The_FreshlyPublished_Output()
+    {
+        var script = RepoFile("deploy", "windows", "install-service.ps1");
+        var branch = ReadInstallBranch(script);
+
+        // 正式目录必须用**本次** publish 的产物替换（否则可能装上残留的旧文件）
+        branch.ShouldContain("Move-Item $stagedDir $finalDir");
+        branch.ShouldContain("Remove-Item $finalDir -Recurse -Force");
+        // 替换后必须再确认 exe 存在
+        branch.ShouldContain("Publish did not produce the expected executable");
+        // 替换失败必须中止（不能带着半个目录继续 New-Service）
+        branch.ShouldContain("Failed to replace the published output directory");
+    }
 }

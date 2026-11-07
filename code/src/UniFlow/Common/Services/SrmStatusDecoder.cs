@@ -38,7 +38,13 @@ public class SrmStatusDecoder
     /// 解析 STATUS 报文并给出首个 SRM 节点的就绪判定。
     /// <para>
     /// <b>生产主路径不使用本方法</b>（状态机与重排队都走 <see cref="IsNodeReady"/>，按节点号取）；
-    /// 本方法保留给外部/诊断调用与单元测试，语义与 <see cref="IsNodeReady"/> 一致。
+    /// 本方法保留给外部/诊断调用与单元测试。
+    /// </para>
+    /// <para>
+    /// 返回值 = <b>首个 SRM 节点的就绪判定</b>（与 <see cref="IsNodeReady"/> 口径一致）：
+    /// 报文里没有可解析的 SRM 节点 → false；节点存在但未就绪（Mode/Status/Error 不满足）→ false。
+    /// 历史缺陷（M-06）：旧实现命中首个节点即无条件 <c>return true</c>，
+    /// <c>isReady</c> 参与了计算却不参与返回值 → 调用方若只看返回值会误判"已就绪"。
     /// </para>
     /// </summary>
     /// <param name="allowStandby">测试开关：true 时额外允许 Mode=STB 与 Status=P 参与判定。</param>
@@ -52,7 +58,8 @@ public class SrmStatusDecoder
         {
             statusMessage = $"Mode:{node.Mode} Status:{node.Status} Error:{node.Error}";
             isReady = EvaluateReady(node, allowedErrors, allowStandby);
-            return true;
+            // 返回值必须与 isReady 一致（不再无条件 true）
+            return isReady;
         }
 
         return false;

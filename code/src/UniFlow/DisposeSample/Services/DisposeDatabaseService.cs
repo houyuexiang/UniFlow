@@ -157,10 +157,23 @@ public class DisposeDatabaseService : IDisposeDatabaseService
 
     public async Task<List<SampleRecord>> GetDisposeSamplesAsync(int cmdType, string cmdName, int maxCount)
     {
+        // 先做名称白名单校验（M-05）：不合法 → 直接拒绝，**不连库、不发任何 SQL**。
+        // 旧实现是"剔除非法字符"（反引号还能通过）→ 名字被静默改成另一个对象，
+        // 注入风险 + 排查困难。现在整名不匹配即拒绝。
+        var safeName = SanitizeSqlName(cmdName);
+        if (safeName == null)
+        {
+            _logger.LogError("GetDisposeSamples rejected: invalid command/view name {Name} " +
+                             "(only letters, digits and underscore are allowed, " +
+                             "optionally with one schema prefix like 'schema.view')", cmdName);
+            throw new ArgumentException(
+                $"Invalid command/view name '{cmdName}': only [A-Za-z0-9_] are allowed " +
+                "(optionally with one 'schema.' prefix).", nameof(cmdName));
+        }
+
         using var conn = NewConnection();
         await conn.OpenAsync();
 
-        var safeName = SanitizeSqlName(cmdName);
         List<SampleRecord> samples;
         if (cmdType == 0)
             samples = (await conn.QueryAsync<SampleRecord>(
@@ -640,11 +653,35 @@ public class DisposeDatabaseService : IDisposeDatabaseService
         return parts.Length > 2 ? parts[2].Trim() : "";
     }
 
-    private static string SanitizeSqlName(string name)
+    /// <summary>
+    /// 视图/存储过程名的**白名单**校验（唯一入口）：只允许 <c>[A-Za-z0-9_]</c>，
+    /// 并允许**可选的一个 schema 前缀**（<c>schema.name</c>）。
+    /// <para>
+    /// 历史缺陷（M-05）：旧实现用正则<em>剔除</em>非法字符且允许反引号
+    /// （<c>[^a-zA-Z0-9_`]</c>）→ 反引号可被拼进 SQL；且"剔除"语义会把
+    /// <c>view over</c> 静默变成 <c>viewover</c>（查到另一个视图，排查不到）。
+    /// 现在：**整名不匹配即拒绝**（返回 null），不做任何字符级修补。
+    /// </para>
+    /// <para>
+    /// 复核 D4：现场 <c>CommandName</c> 可能带 schema 前缀（如 <c>flexlab.view_x</c>），
+    /// 原规则 <c>^[A-Za-z0-9_]+$</c> 会把它整个拒掉 → 丢弃功能停摆。
+    /// 现放宽为 <c>^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$</c>：
+    /// 允许 <c>view_x</c>、<c>flexlab.view_x</c>；仍拒绝 <c>a.b.c</c>、反引号、分号、空格、连字符、非 ASCII。
+    /// </para>
+    /// <para>空名 → 回退默认视图（保留既有默认行为）；非空但含非法字符 → null（拒绝）。</para>
+    /// </summary>
+    /// <returns>合法的名称；或 null（名称非法，调用方必须拒绝执行）。</returns>
+    public static string? SanitizeSqlName(string? name)
     {
-        if (string.IsNullOrEmpty(name)) return "view_overtimestoragesample";
-        // Only allow alphanumeric, underscore, and backtick characters
-        var sanitized = System.Text.RegularExpressions.Regex.Replace(name, @"[^a-zA-Z0-9_`]", "");
-        return string.IsNullOrEmpty(sanitized) ? "view_overtimestoragesample" : sanitized;
+        if (string.IsNullOrEmpty(name)) return DefaultDisposeViewName;
+        return SqlNamePattern.IsMatch(name) ? name : null;
     }
+
+    /// <summary>默认丢弃视图名（配置为空时使用）。</summary>
+    public const string DefaultDisposeViewName = "view_overtimestoragesample";
+
+    // 只允许字母、数字、下划线；可选**一个** schema 前缀（"schema.name"）。
+    // 反引号/分号/空格/连字符/多点("a.b.c")/非 ASCII 一律拒绝。
+    private static readonly System.Text.RegularExpressions.Regex SqlNamePattern =
+        new("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)?$", System.Text.RegularExpressions.RegexOptions.Compiled);
 }

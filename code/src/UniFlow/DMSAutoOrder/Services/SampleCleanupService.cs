@@ -23,18 +23,38 @@ public class SampleCleanupService
     // 仅内存态：进程重启后重新计时（保守，不会误删）。
     private readonly Dictionary<string, DateTime> _firstSeenUtc = new();
 
+    // 删除回滚(affected=0)告警节流（M-08）：key = sid。
+    // 删除失败会保留计时并在**每一轮**重试 → 不节流就是每轮一条 Warning（持续失败刷日志）。
+    // 现在：同一 sid 的回滚告警最多 10 分钟一条；首次失败一定可见；
+    // 累计失败到阈值（每 N 次）时**只记一条** Error（升级告警，不是每轮刷）。
+    private readonly Dictionary<string, DateTime> _rollbackWarnAtUtc = new();
+    private readonly Dictionary<string, int> _rollbackFailCount = new();
+
+    /// <summary>同一 sid 的回滚告警最小间隔（10 分钟）。</summary>
+    public static readonly TimeSpan RollbackWarnInterval = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// 连续回滚每累计到该次数的**倍数** → 升级记一条 Error（关键失败必须可见）。
+    /// <para>第 10、20、30… 次各一条 —— **不是**每轮一条（否则 3s/条刷 Error，告警疲劳）。</para>
+    /// </summary>
+    public const int RollbackErrorEscalationCount = 10;
+
+    private readonly Func<DateTime> _utcNow;
+
     public SampleCleanupService(
         ILogger<SampleCleanupService> logger,
         IDmsDatabaseService db,
         Models.DmsOrderConfig config,
         IAptioSocketClient aptioSocket,
-        IErrorReporter errors)
+        IErrorReporter errors,
+        Func<DateTime>? utcNow = null)
     {
         _logger = logger;
         _db = db;
         _config = config;
         _aptioSocket = aptioSocket;
         _errors = errors;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
     /// <summary>
@@ -214,6 +234,9 @@ public class SampleCleanupService
                         var ageSec = _firstSeenUtc.TryGetValue(prefix + sid, out var fs)
                             ? (int)(nowUtc - fs).TotalSeconds : 0;
                         _firstSeenUtc.Remove(prefix + sid);
+                        // 删除成功 → 清掉该 sid 的回滚节流/计数（下次再失败时"首次"重新可见）
+                        _rollbackWarnAtUtc.Remove(sid);
+                        _rollbackFailCount.Remove(sid);
                         _logger.LogInformation("Trigger-deleted sample {Sid} (oid={Oid}) for test {Test} after {Age}s, {Rows} row(s)",
                             sid, oid, testName, ageSec, affected);
                     }
@@ -223,9 +246,10 @@ public class SampleCleanupService
                         //   绝不能发 Aptio 报文（否则仪器侧已被取消/完成，而 DMS 数据仍在 → 状态不一致），
                         //   也**不能**清计时（否则下一轮会重新计时 → 永远到不了超时 → 样本永远不被清理）。
                         //   保留计时 → 下一轮继续重试删除。
-                        _logger.LogWarning("Trigger delete for {Sid} (oid={Oid}) affected 0 row(s) " +
-                            "(rolled back or no matching rows) — skip Aptio action, keep timing for retry",
-                            sid, oid);
+                        // M-08：回滚告警按 sid 节流（默认 10 分钟一条）——失败会保留计时并每轮重试，
+                        //   不节流就是每轮一条 Warning（持续失败刷日志）。
+                        //   首次失败一定可见；累计失败每到 N 的倍数才记**一条** Error（不是每轮刷）。
+                        LogRollbackFailure(sid, oid, testName);
                     }
                 }
                 dSw.Stop();
@@ -237,6 +261,51 @@ public class SampleCleanupService
                 _logger.LogWarning("Trigger deletion error for {Test}: {Msg}", testName, ex.Message);
                 _errors.Report("DmsCleanup", "ERROR", $"Trigger deletion error for {testName}: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// 删除回滚（affected=0）的告警出口，按 sid 节流（M-08）。
+    /// <para>
+    /// 节流窗口内（默认 10 分钟）同一 sid 只记一条 Warning —— 首次失败一定可见。
+    /// </para>
+    /// <para>
+    /// 升级 Error **只在累计失败次数正好是 <see cref="RollbackErrorEscalationCount"/> 的倍数时记一条**
+    /// （默认第 10、20、30… 次各一条）。
+    /// </para>
+    /// <para>
+    /// 历史缺陷（复核 D1）：<c>escalated = fails &gt;= 10</c> 且 <c>if (!throttled || escalated)</c>
+    /// → 第 10 轮起**每轮**一条 Error（3s/条刷屏，告警疲劳）。
+    /// </para>
+    /// </summary>
+    private void LogRollbackFailure(string sid, string oid, string testName)
+    {
+        var now = _utcNow();
+        var fails = _rollbackFailCount.TryGetValue(sid, out var c) ? c + 1 : 1;
+        _rollbackFailCount[sid] = fails;
+
+        // 升级判定：**恰好**是阈值的倍数才算一次升级（用 >= 会导致每轮都升级）
+        var escalationPoint = RollbackErrorEscalationCount > 0
+            && fails % RollbackErrorEscalationCount == 0;
+        var throttled = _rollbackWarnAtUtc.TryGetValue(sid, out var last) && now - last < RollbackWarnInterval;
+
+        if (escalationPoint)
+        {
+            // 升级告警：每累计 N 次一条 Error（不被 Warning 节流吞掉，也不每轮刷）
+            _rollbackWarnAtUtc[sid] = now;
+            _logger.LogError("Trigger delete for {Sid} (oid={Oid}, test {Test}) affected 0 row(s) " +
+                "{Fails} consecutive time(s) — delete keeps failing, skip Aptio action, keep timing for retry",
+                sid, oid, testName, fails);
+            return;
+        }
+
+        // 其余失败：按 10 分钟/sid 节流记 Warning（首次失败一定可见）
+        if (!throttled)
+        {
+            _rollbackWarnAtUtc[sid] = now;
+            _logger.LogWarning("Trigger delete for {Sid} (oid={Oid}) affected 0 row(s) " +
+                "(rolled back or no matching rows) — skip Aptio action, keep timing for retry",
+                sid, oid);
         }
     }
 }

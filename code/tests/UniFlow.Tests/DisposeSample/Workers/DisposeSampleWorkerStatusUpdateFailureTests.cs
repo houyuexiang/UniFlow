@@ -33,7 +33,9 @@ public class DisposeSampleWorkerStatusUpdateFailureTests : IDisposable
         // 传入自己的 ErrorReporter：测试里手动扮演 ErrorCollectorWorker 把错误写库
         _health = new HealthStore(_healthDbPath, NullLogger<HealthStore>.Instance, 30, _reporter);
         _commands = new AptioCommandService(_socket, NullLogger<AptioCommandService>.Instance);
-        _worker = new DisposeSampleWorker(_logger, _socket, _db, _commands, _decoder, _health);
+        _worker = new DisposeSampleWorker(_logger, _socket, _db, _commands, _decoder, _health,
+            new UniFlow.Tests.Common.TestOptionsMonitor<AptioConfig>(new AptioConfig()),
+            new UniFlow.Tests.Common.TestOptionsMonitor<FeatureConfig>(new FeatureConfig()));
         _worker.LoadConfig(new AptioConfig
         {
             Ip = "127.0.0.1",

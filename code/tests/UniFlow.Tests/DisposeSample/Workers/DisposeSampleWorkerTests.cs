@@ -49,7 +49,9 @@ public class DisposeSampleWorkerTests : IDisposable
             _db,
             _commands,
             _decoder,
-            _health);
+            _health,
+            new UniFlow.Tests.Common.TestOptionsMonitor<AptioConfig>(new AptioConfig()),
+            new UniFlow.Tests.Common.TestOptionsMonitor<FeatureConfig>(new FeatureConfig()));
         _worker.LoadConfig(aptioConfig);
 
         _socket.Connected.Returns(true);

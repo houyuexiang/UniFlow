@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Microsoft.Extensions.Options;
 using UniFlow.Common.Models;
 using UniFlow.Common.Services;
 using UniFlow.DisposeSample.Models;
@@ -15,6 +15,11 @@ public class DisposeSampleWorker : BackgroundService
     private readonly AptioCommandService _commands;
     private readonly SrmStatusDecoder _statusDecoder;
     private readonly HealthStore _health;
+    // 配置唯一入口（M-04）：统一走 IOptionsMonitor，不再自己读 appsettings.json。
+    // 变更令牌由 Program.ConfigureAptioOptions / services.Configure<FeatureConfig>(...) 注册，
+    // appsettings.json 改动 → 配置监视器刷新 → 本 worker 下轮循环即生效（Hot 字段）。
+    private readonly IOptionsMonitor<AptioConfig> _aptioOptions;
+    private readonly IOptionsMonitor<FeatureConfig> _featureOptions;
     private FeatureConfig _features = new();
     private AptioConfig _aptio = new();
     private AptioDisposeSampleConfig _dc = new();
@@ -64,7 +69,9 @@ public class DisposeSampleWorker : BackgroundService
         IDisposeDatabaseService db,
         AptioCommandService commands,
         SrmStatusDecoder statusDecoder,
-        HealthStore health)
+        HealthStore health,
+        IOptionsMonitor<AptioConfig> aptioOptions,
+        IOptionsMonitor<FeatureConfig> featureOptions)
     {
         _logger = logger;
         _socket = socket;
@@ -72,36 +79,59 @@ public class DisposeSampleWorker : BackgroundService
         _commands = commands;
         _statusDecoder = statusDecoder;
         _health = health;
+        _aptioOptions = aptioOptions;
+        _featureOptions = featureOptions;
         RefreshConfig();
     }
 
-    private void RefreshConfig()
+    /// <summary>
+    /// 从配置监视器刷新配置（M-04：单一配置入口）。
+    /// <para>
+    /// 旧实现每 3s 直接 <c>File.ReadAllText("appsettings.json")</c> 并自行解析
+    /// <c>Features</c>/<c>Aptio</c> 两段 → 与 DI 的 <c>IOptions</c>/<c>IOptionsMonitor</c>
+    /// 构成**配置双源**：页面显示的值、DI 绑定到的值、worker 直读到的值可能三者不一致。
+    /// 现在统一走 <see cref="IOptionsMonitor{TOptions}"/>：appsettings.json 改动 →
+    /// 变更令牌触发 → 监视器刷新 → 本方法取 <c>CurrentValue</c>（Hot 字段即生效）。
+    /// </para>
+    /// <para>
+    /// 解析/绑定失败 → 保留上一次可用配置（绝不静默回退出厂默认），与旧实现语义一致。
+    /// </para>
+    /// </summary>
+    public void RefreshConfig()
     {
+        // 两段配置各自独立容错：其中一段绑定失败不影响另一段（旧实现亦如此）
         try
         {
-            var json = File.ReadAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json"));
-            var doc = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
-            if (doc == null) return;
-            if (doc.TryGetValue("Features", out var fe)) _features = JsonSerializer.Deserialize<FeatureConfig>(fe.GetRawText()) ?? new();
-            if (doc.TryGetValue("Aptio", out var ap))
-            {
-                // 解析失败保留上一次可用的配置（绝不静默回退出厂默认）
-                try
-                {
-                    var parsed = JsonSerializer.Deserialize<AptioConfig>(ap.GetRawText());
-                    if (parsed != null) _aptio = parsed;
-                }
-                catch (Exception ex) { _logger.LogError(ex, "Aptio config parse failed, keeping previous values: {Raw}", ap.GetRawText()); }
-            }
+            var features = _featureOptions.CurrentValue;
+            if (features != null) _features = features;
+        }
+        catch (Exception ex)
+        {
+            // 解析失败保留上一次可用配置（绝不静默回退出厂默认）
+            _logger.LogError(ex, "Features config reload failed, keeping previous values");
+        }
+
+        try
+        {
+            var aptio = _aptioOptions.CurrentValue;
+            if (aptio != null) _aptio = aptio;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Aptio config reload failed, keeping previous values");
+        }
+
+        try
+        {
             ApplyDerivedConfig();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "DisposeSample config reload failed, keeping previous values");
+            _logger.LogError(ex, "DisposeSample derived config reload failed, keeping previous values");
         }
     }
 
-    // 供测试/外部显式注入配置（生产运行时由构造函数与 ExecuteAsync 循环经 RefreshConfig 从 appsettings.json 加载）
+    // 供测试/外部显式注入配置（生产运行时由构造函数与 ExecuteAsync 循环经 RefreshConfig 从 IOptionsMonitor 读取）
     public void LoadConfig(AptioConfig aptio, FeatureConfig? features = null)
     {
         _aptio = aptio;

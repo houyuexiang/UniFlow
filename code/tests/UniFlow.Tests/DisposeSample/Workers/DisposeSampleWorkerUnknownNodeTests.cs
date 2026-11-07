@@ -33,7 +33,9 @@ public class DisposeSampleWorkerUnknownNodeTests : IDisposable
         _health = new HealthStore(_healthDbPath, NullLogger<HealthStore>.Instance);
         var commands = new AptioCommandService(_socket, NullLogger<AptioCommandService>.Instance);
         _worker = new DisposeSampleWorker(
-            NullLogger<DisposeSampleWorker>.Instance, _socket, _db, commands, _decoder, _health);
+            NullLogger<DisposeSampleWorker>.Instance, _socket, _db, commands, _decoder, _health,
+            new UniFlow.Tests.Common.TestOptionsMonitor<AptioConfig>(new AptioConfig()),
+            new UniFlow.Tests.Common.TestOptionsMonitor<FeatureConfig>(new FeatureConfig()));
 
         _socket.Connected.Returns(true);
         _db.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<string>()).Returns(Task.FromResult(true));

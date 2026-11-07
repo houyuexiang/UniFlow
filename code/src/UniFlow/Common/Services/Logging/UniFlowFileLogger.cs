@@ -103,6 +103,16 @@ public class LogFileState
     public string? CurrentDate;
     public int FileIndex;
     public StreamWriter? Writer;
+
+    /// <summary>
+    /// 本文件状态自己的锁（M-03）。
+    /// <para>
+    /// 旧实现所有模块共享 provider 的一把全局锁 → 任意模块写日志都会阻塞其它模块；
+    /// 现在每个模块/错误文件各有一把锁 → 不同模块可并发写，互不阻塞。
+    /// </para>
+    /// <para>轮转（Rotate）与写入必须在同一把锁内完成，否则可能出现"半写文件"。</para>
+    /// </summary>
+    public object Lock { get; } = new();
 }
 
 public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
@@ -115,7 +125,6 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
     private readonly int _retentionDays;
     private readonly bool _enabled;
     private readonly Timer _cleanupTimer;
-    private readonly object _lock = new();
 
     public LogLevel MinLevel { get; }
 
@@ -142,10 +151,13 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
         !_enabled ? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
                   : _loggers.GetOrAdd(categoryName, name => new UniFlowFileLogger(name, this));
 
+    /// <summary>
+    /// 写模块日志：锁**该模块自己**的状态锁（M-03：不再用全局锁）。
+    /// </summary>
     public void WriteModuleLog(string module, string line)
     {
         var state = _moduleFiles.GetOrAdd(module, _ => new LogFileState());
-        lock (_lock)
+        lock (state.Lock)
         {
             Rotate(state, $"{module}_{{0}}");
             state.Writer?.WriteLine(line);
@@ -153,9 +165,12 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
         }
     }
 
+    /// <summary>
+    /// 写错误日志：锁**错误文件自己**的状态锁（与模块日志互不阻塞）。
+    /// </summary>
     public void WriteErrorLog(string line)
     {
-        lock (_lock)
+        lock (_errorFile.Lock)
         {
             Rotate(_errorFile, "UniFlow_Error_{0}");
             _errorFile.Writer?.WriteLine(line);
@@ -236,8 +251,12 @@ public class UniFlowFileLoggerProvider : ILoggerProvider, IDisposable
     public void Dispose()
     {
         _cleanupTimer.Dispose();
-        foreach (var state in _moduleFiles.Values) CloseWriter(state);
-        CloseWriter(_errorFile);
+        // 逐个状态加锁关闭：避免与并发写入争用同一个 StreamWriter（M-03）
+        foreach (var state in _moduleFiles.Values)
+        {
+            lock (state.Lock) CloseWriter(state);
+        }
+        lock (_errorFile.Lock) CloseWriter(_errorFile);
         _loggers.Clear();
     }
 }

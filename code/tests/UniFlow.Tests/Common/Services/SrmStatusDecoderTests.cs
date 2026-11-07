@@ -29,7 +29,8 @@ public class SrmStatusDecoderTests
     public void Decode_OffMode_ReturnsNotReady()
     {
         var msg = @"\18^SRM^1^OFF^0000^G^^\";
-        _decoder.Decode(msg, _allowedErrors, out var status, out var isReady).ShouldBeTrue();
+        // M-06：返回值 = 就绪判定（不再是无条件 true）
+        _decoder.Decode(msg, _allowedErrors, out var status, out var isReady).ShouldBeFalse();
         isReady.ShouldBeFalse();
         status.ShouldContain("Mode:OFF");
     }
@@ -38,7 +39,8 @@ public class SrmStatusDecoderTests
     public void Decode_DisallowedError_ReturnsNotReady()
     {
         var msg = @"\18^SRM^1^ON^E001^G^^\";
-        _decoder.Decode(msg, _allowedErrors, out var status, out var isReady).ShouldBeTrue();
+        // M-06：返回值 = 就绪判定（不再是无条件 true）
+        _decoder.Decode(msg, _allowedErrors, out var status, out var isReady).ShouldBeFalse();
         isReady.ShouldBeFalse();
         status.ShouldContain("Error:E001");
     }
@@ -170,11 +172,79 @@ public class SrmStatusDecoderTests
     public void Decode_AllowStandby_FollowsSameRule()
     {
         var msg = @"STATUS\18^SRM^1^STB^0000^P^^\";
-        _decoder.Decode(msg, _allowedErrors, out var status, out var isReady).ShouldBeTrue();
+        _decoder.Decode(msg, _allowedErrors, out var status, out var isReady).ShouldBeFalse();
         isReady.ShouldBeFalse();                                   // 默认关闭
         _decoder.Decode(msg, _allowedErrors, out status, out isReady, allowStandby: true).ShouldBeTrue();
         isReady.ShouldBeTrue();                                    // 开关开启
         status.ShouldBe("Mode:STB Status:P Error:0000");
+    }
+
+    // ===== M-06：Decode 的返回值必须与就绪判定一致（不再"命中首个节点就 true"）=====
+
+    [Fact]
+    public void Decode_ReturnValue_MatchesIsReady_ForNotReadyNode()
+    {
+        // 负向：节点存在但未就绪 → 返回值与 isReady 都必须是 false
+        var msg = @"STATUS\18^SRM^1^OFF^0000^G^^\";
+        var ret = _decoder.Decode(msg, _allowedErrors, out _, out var isReady);
+        ret.ShouldBe(isReady);
+        ret.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Decode_ReturnValue_MatchesIsReady_ForReadyNode()
+    {
+        // 正向：节点就绪 → 返回值与 isReady 都必须是 true
+        var msg = @"STATUS\18^SRM^1^ON^0000^G^^\";
+        var ret = _decoder.Decode(msg, _allowedErrors, out _, out var isReady);
+        ret.ShouldBe(isReady);
+        ret.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Decode_MultipleNodes_UsesFirstNodeAndReturnsItsReadiness()
+    {
+        // 多节点报文：Decode 只取首个 SRM 节点（诊断口径），
+        // 返回值 = 首个节点的就绪判定；按节点号取请用 IsNodeReady。
+        var msg = @"STATUS\18^SRM^1^ON^0000^G^^\25^SRM^1^OFF^0000^G^^\";
+
+        var ret = _decoder.Decode(msg, _allowedErrors, out var status, out var isReady);
+
+        ret.ShouldBeTrue();
+        isReady.ShouldBeTrue();
+        status.ShouldBe("Mode:ON Status:G Error:0000");          // 首个节点
+        // 但按节点号取时，第二个未就绪节点仍是 false
+        _decoder.IsNodeReady(msg, "25", _allowedErrors).ShouldBeFalse();
+        _decoder.IsNodeReady(msg, "18", _allowedErrors).ShouldBeTrue();
+        // 解析出两个节点
+        _decoder.DecodeAll(msg).Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Decode_FirstNodeNotReady_SecondNodeReady_StillReturnsFalse()
+    {
+        // 多节点：首个节点未就绪 → 返回 false（不能因为后面有就绪节点就误报就绪）
+        var msg = @"STATUS\18^SRM^1^OFF^0000^G^^\25^SRM^1^ON^0000^G^^\";
+
+        var ret = _decoder.Decode(msg, _allowedErrors, out var status, out var isReady);
+
+        ret.ShouldBeFalse();
+        isReady.ShouldBeFalse();
+        status.ShouldContain("Mode:OFF");
+        // 按节点号取仍可拿到第二个节点的就绪状态
+        _decoder.IsNodeReady(msg, "25", _allowedErrors).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Decode_NoSrmNode_ReturnsFalseAndEmptyStatus()
+    {
+        var msg = @"STATUS\18^ABC^1^ON^0000^G^^\";
+
+        var ret = _decoder.Decode(msg, _allowedErrors, out var status, out var isReady);
+
+        ret.ShouldBeFalse();
+        isReady.ShouldBeFalse();
+        status.ShouldBeEmpty();
     }
 
     [Fact]
