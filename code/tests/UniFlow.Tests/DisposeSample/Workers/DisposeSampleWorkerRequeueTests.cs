@@ -16,7 +16,7 @@ namespace UniFlow.Tests.DisposeSample.Workers;
 /// 丢弃队列「重排队」行为用例（5 分钟批量检查 + 条件重排队）：
 /// - 命中（节点 ON + 状态 G/Y + 错误码在允许列表）→ 把记录放回待发队列（send=0），<b>不直接下发 COMMENT</b>；
 /// - STB（Stand-by）等非 ON 模式 → 一律等待，不重排队；
-/// - 发送窗口满 → 等待，连 STATUS-REQUEST 都不发；
+/// - 发送窗口满 → <b>仍然执行本轮重排队</b>（死锁修复：放回 send=0 才能释放窗口）；无候选时依旧不发 STATUS；
 /// - 不在允许丢弃的时间段 → 只查库，不发任何指令。
 /// </summary>
 public class DisposeSampleWorkerRequeueTests : IDisposable
@@ -277,19 +277,42 @@ public class DisposeSampleWorkerRequeueTests : IDisposable
         await _db.DidNotReceive().RequeueForResendAsync(Arg.Any<IReadOnlyCollection<string>>());
     }
 
-    // ===== 窗口满 → 不发 STATUS、不重排队 =====
+    // ===== 窗口满 → 仍然执行重排队（放回 send=0 才能释放窗口）；无候选时依旧不发 STATUS =====
 
     [Fact]
-    public async Task Requeue_WindowFull_SkipsStatusAndRequeue()
+    public async Task Requeue_WindowFull_StillRequeuesEligibleRecords()
     {
+        // 死锁修复：窗口满（inFlight=10、窗口=10）时若直接 return 0，
+        // 窗口里 10 条一直未确认 → 重排队永远不执行 → 窗口永远不释放（死锁）。
+        // 现在窗口满仍执行本轮重排队检查：有到期候选 → 发 1 条 STATUS 并把记录放回 send=0。
         _db.CountPendingConfirmAsync().Returns(Task.FromResult(10));   // inFlight = 窗口 10
         SetCandidates("S001");
+        SetStatus(@"STATUS\18^SRM^1^ON^0000^G^^\");
+        _db.RequeueForResendAsync(Arg.Any<IReadOnlyCollection<string>>()).Returns(Task.FromResult(1));
+
+        var n = await _worker.MaybeRequeueForResendAsync();
+
+        n.ShouldBe(1);
+        // 窗口满也发 1 条 STATUS-REQUEST（用于判定各节点是否可丢弃）
+        await _socket.Received(1).SendAsync(Arg.Is<string>(s => s == "STATUS-REQUEST 1"), Arg.Any<CancellationToken>());
+        // 记录被放回待发队列（send=0）→ 窗口得以释放
+        await _db.Received(1).RequeueForResendAsync(
+            Arg.Is<IReadOnlyCollection<string>>(c => c.Contains("S001")));
+        // 仍然绝不下发丢弃命令
+        await _socket.DidNotReceive().SendAsync(Arg.Is<string>(s => s.StartsWith("COMMENT")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Requeue_WindowFull_NoCandidates_DoesNotSendStatus()
+    {
+        // 窗口满 + 没有到期候选 → 依旧不发 STATUS（保持「没有候选不发 STATUS」的原行为）
+        _db.CountPendingConfirmAsync().Returns(Task.FromResult(10));   // inFlight = 窗口 10
+        SetCandidates();                                                // 空候选
         SetStatus(@"STATUS\18^SRM^1^ON^0000^G^^\");
 
         var n = await _worker.MaybeRequeueForResendAsync();
 
         n.ShouldBe(0);
-        // 窗口满 → 连 STATUS-REQUEST 都不发
         await _socket.DidNotReceive().SendAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
         await _db.DidNotReceive().RequeueForResendAsync(Arg.Any<IReadOnlyCollection<string>>());
     }

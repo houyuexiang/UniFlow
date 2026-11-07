@@ -86,6 +86,9 @@
 | `DisposeSample.LoopIntervalSeconds` | int | `3` | 循环间隔(秒) |
 | `DisposeSample.MaxWaitDiscardCount` | int | `2` | 最大等待确认次数 |
 | `DisposeSample.MaxOnetimeSelectDiscardCount` | int | `10` | 单次最大选择丢弃数；**同时是发送窗口**（未丢弃总数上限） |
+| `DisposeSample.EnableFastFill` | bool | `false` | **快速填窗开关，默认关闭**。关闭（默认）= 行为与 1.0.6.7 完全一致（一条一条发、逐条确认）。开启 = 一个 tick 内连续发 `COMMENT` 直到发送窗口满（窗口上限仍是 `MaxOnetimeSelectDiscardCount`，默认 10），不再每条等确认；确认改为**批量**（`FastFillConfirmIntervalSeconds`）。热生效 |
+| `DisposeSample.FastFillIntervalMs` | int | `1000` | 快速填窗时每条 `COMMENT` 之间的间隔（毫秒，范围 `0~5000`，**代码硬钳制**）；`0` = 不等待（连发）。**注意：`0` 只是不等待，不是关闭快速填窗**——开关只有 `EnableFastFill`。仅在 `EnableFastFill=true` 时生效。热生效 |
+| `DisposeSample.FastFillConfirmIntervalSeconds` | int | `5` | 快速填窗的**批量确认**间隔（秒，范围 `1~60`，**代码硬钳制**）：每该秒用**一条** SQL 确认所有 `send=1 & disposed=0` 的在途记录，命中即置 `disposed=1` 并释放发送窗口。仅在 `EnableFastFill=true` 时生效。热生效 |
 | `DisposeSample.AllowSrmErrorCode` | string | `0000,0F0A,0E59,AAAA` | 允许的 SRM 错误码 |
 | `DisposeSample.SkipOnUnknownNode` | bool | `true` | 未知节点是否跳过 |
 | `DisposeSample.AllowStandbyDispose` | bool | `false` | **测试开关**：开启后 `STB`（Stand-by）与 `P`（Pink）也允许丢弃；`GTO` / `PA` / `OFF` / `FR` / `SH` / `EXE` **始终不允许**。关闭（默认）= 可丢弃 = `Mode=="ON"` 且 `Status∈{G,Y}` 且错误码在允许列表。STB 不允许进新样本，但允许执行丢弃；本开关只管「是否允许 STB/P 参与丢弃判断」，不涉及进样本逻辑。热生效 |
@@ -195,9 +198,20 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 | 场景 | 行为 |
 |------|------|
 | 有待发记录（`send=0`） | **先发**：`HandleNone` 直接转 `Ready`（**不受窗口阻断**）。发送闸门在 `HandleReady`：按**在途数** `inFlight = send=1 且 disposed=0` 判断，满则本轮不发任何命令 |
-| `inFlight >= 窗口`（发送闸门） | **只等待**：不下发任何新 COMMENT（连 STATUS 探测都不发）；状态保持 `Ready`，下一轮再检查 |
+| `inFlight >= 窗口`（发送闸门） | **只等待**：不下发任何新 COMMENT（连 STATUS 探测都不发）；状态保持 `Ready`，下一轮再检查。**例外**：5 分钟一轮的**重排队检查**在「有到期候选」时仍可发 1 条 `STATUS-REQUEST`（见 §6） |
 | `active >= 窗口` 且无待发（插入闸门） | **不插入**新丢弃记录（`HandleNone` 保持 `None`）；本轮插入条数 = `min(need, 窗口 - active, 候选条数)` |
 | 窗口 `<= 0` | 视为**不限**（保持旧行为：不做窗口判断、插入条数 = `need`） |
+
+> 💡 **开启 `EnableFastFill` 后**（默认关闭）：窗口内**连续发送**（一个 tick 内连发 `COMMENT` 直到窗口满，
+> 每条间隔 `FastFillIntervalMs`，默认 1000ms），确认改为**批量**（`FastFillConfirmIntervalSeconds`，默认 5 秒一条 SQL）；
+> 窗口上限仍是 `MaxOnetimeSelectDiscardCount`（默认 10），`窗口 <= 0`（不限）时**不走**快速填窗，仍按一条一条发
+> （此时确认也仍走原来的**逐条确认**，`MaxWaitDiscardCount` 继续生效）。
+
+> 🔒 **范围由代码硬钳制**（页面 `max` 只是输入提示，改 `appsettings.json` 也会被钳制）：
+> `FastFillIntervalMs` → `0~5000`（**上限 5000ms，防止单 tick 长时间阻塞**：写成 600000 会让一个 tick 卡约 100 分钟）；
+> `FastFillConfirmIntervalSeconds` → `1~60`（0 按 1 秒；999 按 60 秒）。
+> 未知节点 `skip` 单轮最多 **200** 条（`FastFillMaxSkipsPerTick`）：达到上限打 Warning
+> 「本轮跳过 N 条后暂停」并结束本轮，避免节点号配错时一个 tick 遍历整个待发队列。
 
 > ⚠️ 窗口**只拦插入，不拦发送**：若窗口里正好是 10 条 `send=0` 待发（`active=10`、`pendingSend=10`、`inFlight=0`），
 > 必须照常进入 `Ready` 把它们发出去；否则会复现「窗口塞满就不发」的老毛病。
@@ -212,7 +226,12 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 
 **重排队（不是直接重发）**：每 **5 分钟**一轮（`ResendIntervalMinutes`，默认 `5`）。命中「节点 `ON` + 状态 `G/Y` + 错误码允许」的记录
 只会被**放回待发队列**（`send=0`），**绝不直接下发丢弃命令**；真正发送仍由状态机按窗口一条条进行（详见 §6）。
-不在允许丢弃的时间段 → 只查库、等下一个时间窗口；窗口满（`inFlight >= 窗口`）→ 等待，连 `STATUS-REQUEST` 都不发。
+不在允许丢弃的时间段 → 只查库、等下一个时间窗口；窗口满（`inFlight >= 窗口`）→ **仍然执行重排队**（放回 `send=0` 才能释放窗口），但**没有到期候选时连 `STATUS-REQUEST` 都不发**。
+
+> ⚠️ **重排队死锁修复对默认现场（`EnableFastFill=false`）同样生效**（不受快速填窗开关控制）：
+> 窗口满（`inFlight >= 窗口`）**且有到期候选**时，会发 **1 条** `STATUS-REQUEST` 并把到期记录放回 `send=0` 以释放窗口
+> —— 这**可能比 1.0.6.7 更早重发未确认记录**（即出现**重复 `COMMENT`**）。
+> 现场启用前请先在**测试环境**验证「慢冰箱 / 节点未就绪」场景下重复 `COMMENT` 是否可接受。
 
 ### 4. 确认口径（**没有 ACK**）
 
@@ -266,8 +285,8 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
   | 步骤 | 条件 | 动作 |
   |------|------|------|
   | 1 | 不在允许丢弃的时间段（`RunDays` / `TimeRanges`） | **只查库，不发任何指令**，等下一个可丢弃时间窗口 |
-  | 2 | 发送窗口满（`inFlight = send=1 且 disposed=0` ≥ `MaxOnetimeSelectDiscardCount`） | **等待，不发任何指令**（连 `STATUS-REQUEST` 都不发） |
-  | 3 | 窗口未满且在工作时间 | 发 **1 条** `STATUS-REQUEST`（每轮仅此一条） |
+  | 2 | 发送窗口满（`inFlight = send=1 且 disposed=0` ≥ `MaxOnetimeSelectDiscardCount`） | **仍然执行本轮重排队检查**（窗口满时更需要重排队把记录放回 `send=0` 才能释放窗口）；**无到期候选时依旧不发任何指令**（连 `STATUS-REQUEST` 都不发） |
+  | 3 | 在工作时间且**有到期候选**（窗口满也照样走这一步） | 发 **1 条** `STATUS-REQUEST`（每轮仅此一条）；无候选则连 `STATUS-REQUEST` 都不发 |
   | 4 | 记录所在节点满足 `Mode=ON` + `Status ∈ {G,Y}` + `ErrorCode` 在允许列表 | **放回待发队列**（`send=0`；不改 `send_time`、不增 `resend_count`） |
   | 5 | 节点不满足上述条件 | **一律等待，不重排队**（日志带 `mode=STB → wait`，10 分钟节流）。判定口径受测试开关 `AllowStandbyDispose` 影响，见下方「6.1 可丢弃判定与测试开关」 |
   | 6 | 位置里取不到节点号 | 按 `SkipOnUnknownNode` 处理：`true` → 标记 `send=2`（skip sentinel）；`false` → 跳过 |

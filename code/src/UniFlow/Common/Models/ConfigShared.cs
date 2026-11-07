@@ -85,6 +85,18 @@ public class AptioDisposeSampleConfig
     [Restart(RestartLevel.Hot)] public int MaxOnetimeSelectDiscardCount { get; set; } = 10;
     [Restart(RestartLevel.Hot)] public bool SkipOnUnknownNode { get; set; } = true;
 
+    // ===== 快速填窗（可选，默认关闭）=====
+    // EnableFastFill：默认关闭。关闭时行为与 1.0.6.7 完全一致（一条一条发、Ready→Ack→Dispose 逐条确认）。
+    // 开启后：在一个 tick 内连续发 COMMENT 直到发送窗口满（窗口上限仍是 MaxOnetimeSelectDiscardCount，默认 10），
+    //          不再每条等确认；确认改为批量（FastFillConfirmIntervalSeconds 秒一次，一条 SQL 确认所有在途记录）。
+    // 注意：FastFillIntervalMs = 0 只是「每条之间不等待」，**不是**关闭快速填窗——开关只有 EnableFastFill。
+    [Restart(RestartLevel.Hot)] public bool EnableFastFill { get; set; } = false;
+    // 每条 COMMENT 之间的间隔（毫秒，范围 0~5000）：0 = 不等待（连发）。仅在 EnableFastFill=true 时生效。
+    [Restart(RestartLevel.Hot)] public int FastFillIntervalMs { get; set; } = 1000;
+    // 批量确认间隔（秒，范围 1~60）：每该秒用一条 SQL 确认所有 send=1 & disposed=0 的在途记录，命中即释放窗口。
+    // 仅在 EnableFastFill=true 时生效。
+    [Restart(RestartLevel.Hot)] public int FastFillConfirmIntervalSeconds { get; set; } = 5;
+
     // ===== 测试开关：允许 Stand-by 丢弃 =====
     // false（默认）= 保持现状：可丢弃 = Mode=="ON" && Status∈{G,Y} && 错误码在允许列表
     // true            = 额外允许 Mode=="STB"（Stand-by）与 Status=="P"（Pink）参与丢弃判断

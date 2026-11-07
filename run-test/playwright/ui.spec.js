@@ -194,6 +194,75 @@ test.describe('UI-4 功能配置', () => {
     expect(fileText).toMatch(new RegExp('"LoopIntervalSeconds":\\s*' + next));
   });
 
+  // 快速填窗（2026-11-07 新增 3 项）：EnableFastFill（switch，代码默认 false）、
+  // FastFillIntervalMs（number，max 5000）、FastFillConfirmIntervalSeconds（number，max 60）。
+  // 默认值说明：基线 /tmp/uniflow-e2e/appsettings.test.json 不含这三个键，且 GET /api/config
+  // （ConfigService.ReadAll）原样返回文件 JSON、不注入 C# 模型默认（ConfigShared.cs:93-98 的
+  // =false/1000/5 只在配置绑定对象时生效）→ 表单实际渲染：checkbox 未勾选、两个 number 为空串。
+  // 故按「实际渲染」断言空串 + max 属性 + hint 文案中的「默认 1000 / 默认 5」；若日后基线补入
+  // 这三个键，本用例的值断言需随实际渲染调整。
+  // 保存不落盘：page.route 按 pathname 精确拦截 PUT /api/config/batch（保留真实
+  // GET /api/auth/challenge，密码弹窗真实发生），捕获请求体后直接 fulfill 200。
+  test('快速填窗 3 个配置项可渲染/可保存：恰一次密码、batch 含新键（EnableFastFill）', async ({ page }) => {
+    const st = watch(page, {
+      prompt: 'accept',
+      countMethods: ['PUT /api/config/batch', 'PUT /api/config'],
+    });
+    const batchBodies = [];
+    await page.route((u) => u.pathname === '/api/config/batch', (route) => {
+      if (route.request().method() !== 'PUT') return route.fallback();
+      batchBodies.push(route.request().postData() || '');
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"success":true}' });
+    });
+    await page.goto('/');
+    await openTab(page, 'forms');
+    await expect(page.locator('#formsBody .form-row').first()).toBeVisible();
+
+    const row = (p) => page.locator('.form-row', { has: page.locator('label[data-path="' + p + '"]') });
+    // ① EnableFastFill：switch 渲染为隐藏 checkbox + .switch-ui 外观（renderControl type==='switch'）。
+    //    checkbox 本身 display:none → 外观断言 .switch-wrap/.switch-ui 可见、checkbox 存在且未勾选。
+    const swRow = row('Aptio:DisposeSample:EnableFastFill');
+    await expect(swRow.locator('label.switch-wrap')).toBeVisible();
+    await expect(swRow.locator('.switch-ui')).toBeVisible();
+    const sw = swRow.locator('input[type="checkbox"]');
+    await expect(sw).toHaveCount(1);
+    await expect(sw).not.toBeChecked(); // 默认关
+    // ② FastFillIntervalMs：number + max 5000；③ FastFillConfirmIntervalSeconds：number + max 60
+    const msInput = row('Aptio:DisposeSample:FastFillIntervalMs').locator('input[type="number"]');
+    await expect(msInput).toBeVisible();
+    await expect(msInput).toHaveAttribute('max', '5000');
+    await expect(msInput).toHaveValue(''); // 基线无该键 → 空串渲染（见上方说明）
+    await expect(row('Aptio:DisposeSample:FastFillIntervalMs').locator('.tip-icon'))
+      .toHaveAttribute('data-tip', /默认 1000/); // hint 标明代码默认值
+    const cfInput = row('Aptio:DisposeSample:FastFillConfirmIntervalSeconds').locator('input[type="number"]');
+    await expect(cfInput).toBeVisible();
+    await expect(cfInput).toHaveAttribute('max', '60');
+    await expect(cfInput).toHaveValue('');
+    await expect(row('Aptio:DisposeSample:FastFillConfirmIntervalSeconds').locator('.tip-icon'))
+      .toHaveAttribute('data-tip', /默认 5/);
+
+    // 修改：勾选开关 + 间隔 1500 + 批量确认 10，然后保存全部
+    await swRow.locator('.switch-ui').click(); // label.switch-wrap 包裹 checkbox，点外观即切换
+    await expect(sw).toBeChecked();
+    await msInput.fill('1500');
+    await cfInput.fill('10');
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    await expect(page.locator('#formsHint')).toContainText('✅');
+
+    expect(st.prompts, '一次保存全部应恰弹一次密码').toBe(1);
+    expect(batchBodies.length, '应恰一次 PUT /api/config/batch（mock 捕获）').toBe(1);
+    expect(st.reqCounts['PUT /api/config/batch'] || 0, '应只发一次批量保存请求').toBe(1);
+    expect(st.reqCounts['PUT /api/config'] || 0, '不应再走单字段保存').toBe(0);
+    // 请求体：changes 含三个新键且值正确（开关=true；number 经 parseInt 为数字）
+    const changes = JSON.parse(batchBodies[0]).changes;
+    const valOf = (p) => (changes.find((c) => c.path === p) || {}).value;
+    expect(valOf('Aptio:DisposeSample:EnableFastFill'), 'EnableFastFill 应为 true').toBe(true);
+    expect(valOf('Aptio:DisposeSample:FastFillIntervalMs'), 'FastFillIntervalMs 应为 1500').toBe(1500);
+    expect(valOf('Aptio:DisposeSample:FastFillConfirmIntervalSeconds'), 'ConfirmIntervalSeconds 应为 10').toBe(10);
+    st.expectClean();
+  });
+
   test('WebAdmin:AdminPassword 不可在表单编辑（无输入控件），仅有后台修改说明', async ({ page }) => {
     const st = watch(page);
     await page.goto('/');

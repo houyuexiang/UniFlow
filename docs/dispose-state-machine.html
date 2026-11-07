@@ -4002,15 +4002,15 @@
         <text data-detail="fine" x="402" y="325" class="t-cloud" font-size="7" text-anchor="middle">插入闸门</text>
         </g>
 
-        <g id="node-waitInFlight" data-node-id="waitInFlight" data-node-label="在途窗口满" tabindex="0" role="button" aria-label="Focus 在途窗口满, inFlight ≥ 10：不发 COMMENT/STATUS, 窗口 / 等待" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="inFlight ≥ 10：不发 COMMENT/STATUS" data-node-tag="发送闸门" data-node-context="窗口 / 等待">
-          <title>在途窗口满 · inFlight ≥ 10：不发 COMMENT/STATUS · 窗口 / 等待 · 发送闸门</title>
+        <g id="node-waitInFlight" data-node-id="waitInFlight" data-node-label="在途窗口满" tabindex="0" role="button" aria-label="Focus 在途窗口满, inFlight ≥ 10：不发 COMMENT（重排队可发 1 条 STATUS）, 窗口 / 等待" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="inFlight ≥ 10：不发 COMMENT（重排队可发 1 条 STATUS）" data-node-tag="发送闸门" data-node-context="窗口 / 等待">
+          <title>在途窗口满 · inFlight ≥ 10：不发 COMMENT（重排队可发 1 条 STATUS） · 窗口 / 等待 · 发送闸门</title>
           <rect x="493" y="278" width="126" height="58" rx="7" class="c-mask"/>
           <rect x="493" y="278" width="126" height="58" rx="7" class="c-cloud" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="waiting" class="semantic-sigil s-cloud" transform="translate(602 284) scale(0.6875)">
             <path d="M4 2.5h8M4 13.5h8M5 3c0 2.8 2 3.2 3 5-1 1.8-3 2.2-3 5M11 3c0 2.8-2 3.2-3 5 1 1.8 3 2.2 3 5"/>
           </g>
           <text data-detail-anchor x="556" y="299" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">在途窗口满</text>
-          <text data-detail="context" x="556" y="315" class="t-muted" font-size="7" text-anchor="middle">inFlight ≥ 10：不发 COMMENT/STATUS</text>
+          <text data-detail="context" x="556" y="315" class="t-muted" font-size="7" text-anchor="middle">inFlight ≥ 10：不发 COMMENT（重排队可发 1 条 STATUS）</text>
         <text data-detail="fine" x="556" y="325" class="t-cloud" font-size="7" text-anchor="middle">发送闸门</text>
         </g>
 
@@ -4297,7 +4297,7 @@
         </div>
         <ul>
           <li>&bull; active = send=0 待发 + send=1 未确认；active≥10 不再插新记录</li>
-          <li>&bull; inFlight = send=1 且 disposed=0；inFlight≥10 不发任何 COMMENT/STATUS</li>
+          <li>&bull; inFlight = send=1 且 disposed=0；inFlight≥10 不发 COMMENT，但 5 分钟重排队仍可发 1 条 STATUS 并把到期记录放回 send=0 以释放窗口</li>
           <li>&bull; 有 send=0 时先发（不受 active 闸门阻断），否则 10 条待发会永远卡在 None</li>
         </ul>
       </div>
@@ -4312,6 +4312,7 @@
           <li>&bull; 每 60 秒补查（只查库）；每 5 分钟重排队：命中才放回待发队列，不直接发</li>
           <li>&bull; 重发 24 次仍无 &amp;3 → send=3 失败，释放窗口</li>
           <li>&bull; STB 默认等待；AllowStandbyDispose=true 时 STB/Pink 也可丢弃（GTO 始终不允许）</li>
+          <li>&bull; 可选快速填窗：EnableFastFill=true 时窗口内连续发 COMMENT（间隔 FastFillIntervalMs 0~5000ms），确认改批量（FastFillConfirmIntervalSeconds 1~60s）</li>
         </ul>
       </div>
 

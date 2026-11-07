@@ -62,6 +62,39 @@ public class DisposeSampleWorker : BackgroundService
     private static readonly TimeSpan WindowLogInterval = TimeSpan.FromMinutes(10);
     // 待发数量上次值（仅用于日志降噪）
     private int _lastPendingSend = -1;
+    // 快速填窗的批量确认节流：距上次批量确认 >= FastFillConfirmIntervalSeconds（默认 5 秒）才真正查一次
+    private DateTime _lastFastConfirmUtc = DateTime.MinValue;
+    // 可注入的时钟（仅用于快速填窗批量确认的节流判定；默认系统 UTC 时钟）
+    private readonly Func<DateTime> _utcNow;
+
+    // ===== 快速填窗参数范围（代码硬钳制；与页面 max、文档「范围」保持一致）=====
+    // 快速填窗间隔（毫秒）的代码硬上限：防止「填错数字」让单个 tick 长时间阻塞
+    //（FastFillIntervalMs=600000 ≈ 每个 tick 卡 100 分钟 → 健康心跳 stale、维护停摆）。
+    public const int FastFillIntervalMaxMs = 5000;
+    // 批量确认间隔（秒）的范围：1~60（1 = 确认最快；60 = 最慢，节流更保守）。
+    public const int FastFillConfirmIntervalMinSeconds = 1;
+    public const int FastFillConfirmIntervalMaxSeconds = 60;
+    // 快速填窗单轮「跳过未知节点」迭代上限：
+    // 节点号配错（如 18 vs 018）时队首会连续是未知节点，无上限会让一个 tick 遍历整个待发队列
+    //（每条 1 次 STATUS 往返 + 间隔）→ 长时间占用 tick，期间健康心跳 / 补查 / 重排队全部停摆。
+    // 达到上限 → 打 Warning 并结束本轮（下一轮继续）。
+    public const int FastFillMaxSkipsPerTick = 200;
+    // skip 不是发送：skip 成功后不必等完整的发送间隔（默认 1s），最多等这个较小的固定延迟。
+    private const int FastFillSkipDelayMs = 100;
+
+    /// <summary>
+    /// 快速填窗间隔（毫秒）范围钳制：<b>0~5000</b>。
+    /// <para>代码硬上限 5000ms，防止单 tick 长时间阻塞（配置写成 600000 会让一个 tick 卡住约 100 分钟）。</para>
+    /// <para>0 = 不等待（连发）；负数按 0 处理。页面 <c>max=5000</c> 只是输入提示，真正生效的是这里的钳制。</para>
+    /// </summary>
+    public static int ClampFastFillIntervalMs(int ms) => Math.Clamp(ms, 0, FastFillIntervalMaxMs);
+
+    /// <summary>
+    /// 批量确认间隔（秒）范围钳制：<b>1~60</b>。
+    /// <para>下限 1 秒（0 或负数 → 1）；上限 60 秒（防止配置成超大值导致在途记录迟迟不被确认、窗口不释放）。</para>
+    /// </summary>
+    public static int ClampFastFillConfirmIntervalSeconds(int seconds)
+        => Math.Clamp(seconds, FastFillConfirmIntervalMinSeconds, FastFillConfirmIntervalMaxSeconds);
 
     public DisposeSampleWorker(
         ILogger<DisposeSampleWorker> logger,
@@ -71,7 +104,8 @@ public class DisposeSampleWorker : BackgroundService
         SrmStatusDecoder statusDecoder,
         HealthStore health,
         IOptionsMonitor<AptioConfig> aptioOptions,
-        IOptionsMonitor<FeatureConfig> featureOptions)
+        IOptionsMonitor<FeatureConfig> featureOptions,
+        Func<DateTime>? utcNow = null)
     {
         _logger = logger;
         _socket = socket;
@@ -81,6 +115,7 @@ public class DisposeSampleWorker : BackgroundService
         _health = health;
         _aptioOptions = aptioOptions;
         _featureOptions = featureOptions;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
         RefreshConfig();
     }
 
@@ -185,6 +220,11 @@ public class DisposeSampleWorker : BackgroundService
                 if (!await _db.PingAsync())
                 { await _health.RecordHealthAsync("DisposeSample", "degraded", "Database unavailable"); await Task.Delay(_dc.LoopIntervalSeconds * 1000, ct); continue; }
 
+                // 快速填窗的批量确认（EnableFastFill=true 时）：先把在途记录批量确认掉、释放窗口，
+                // 再让后面的 Tick 补发。开关关闭时本方法直接返回 0（不查库，行为与 1.0.6.7 完全一致）。
+                try { await MaybeFastConfirmAsync(ct); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Dispose fast-fill confirm failed"); }
+
                 // 后期补查 + 到期重发 + 失败标记 + 队列告警（无论当前状态机处于哪个状态）
                 try { await MaybeRecheckAsync(ct); }
                 catch (Exception ex) { _logger.LogWarning(ex, "Dispose recheck failed"); }
@@ -201,6 +241,42 @@ public class DisposeSampleWorker : BackgroundService
 
         try { await _db.DeleteUnsendAsync(); _logger.LogInformation("DisposeSample stopped"); }
         catch { _logger.LogWarning("DisposeSample cleanup skipped"); }
+    }
+
+    /// <summary>
+    /// 快速填窗的<b>批量确认</b>（仅 <c>EnableFastFill=true</c> 时生效）。
+    /// <para>
+    /// 语义：每 <c>FastFillConfirmIntervalSeconds</c> 秒（默认 5）用<b>一条</b> SQL 确认所有
+    /// <c>send=1 &amp; disposed=0</c> 的在途记录；命中（位置已变为 <c>&amp;3-{node}-%</c>）即置 <c>disposed=1</c>，
+    /// 记录退出在途计数 → 发送窗口释放 → 下一轮可继续补发。
+    /// </para>
+    /// <para>
+    /// 开关关闭 → 直接返回 0（<b>不查库</b>，行为与 1.0.6.7 完全一致）。
+    /// 不推进 60s 维护补查的轮转游标 <c>_recheckCursor</c>（那套是「按 ID 分批轮转全表」，
+    /// 这里要的是「一次覆盖全部在途」，max=200 已足够覆盖窗口 10；窗口 &lt;= 0 时最多 200 条/次，
+    /// 其余由 60s 轮转兜底）。
+    /// </para>
+    /// <para>
+    /// 间隔经 <see cref="ClampFastFillConfirmIntervalSeconds"/> 钳制到 <b>1~60 秒</b>（代码硬钳制）：
+    /// 配置 0 → 按 1 秒；配置 999 → 按 60 秒。
+    /// </para>
+    /// </summary>
+    public async Task<int> MaybeFastConfirmAsync(CancellationToken ct = default)
+    {
+        if (!_dc.EnableFastFill) return 0;             // 开关关闭 → 不查库
+
+        var now = _utcNow();
+        // 范围钳制 1~60（代码硬钳制）：0/负数 → 1；>60 → 60。页面 max=60 只是输入提示。
+        var seconds = ClampFastFillConfirmIntervalSeconds(_dc.FastFillConfirmIntervalSeconds);
+        if (_lastFastConfirmUtc != DateTime.MinValue
+            && now - _lastFastConfirmUtc < TimeSpan.FromSeconds(seconds))
+            return 0;                                  // 节流窗口内不查库
+        _lastFastConfirmUtc = now;
+
+        var (hits, _) = await _db.RecheckPendingDisposalsAsync(200, 0);
+        if (hits > 0)
+            _logger.LogInformation("Fast-fill confirm: {Hits} in-flight disposal(s) confirmed", hits);
+        return hits;
     }
 
     /// <summary>
@@ -272,7 +348,9 @@ public class DisposeSampleWorker : BackgroundService
     /// <summary>
     /// 重排队（每 ResendIntervalMinutes 分钟一轮，默认 5 分钟）——<b>只重排队，绝不直接下发丢弃命令</b>：
     /// 1) 不在允许丢弃的时间段（RunDays/TimeRanges）→ 只查库，不发任何指令，等下一个时间窗口；
-    /// 2) 发送窗口满（inFlight = send=1 &amp; disposed=0 达到 MaxOnetimeSelectDiscardCount）→ 等待，连 STATUS 都不发；
+    /// 2) 发送窗口满（inFlight = send=1 &amp; disposed=0 达到 MaxOnetimeSelectDiscardCount）→ <b>仍然执行本轮重排队检查</b>
+    ///    （窗口满时更需要重排队来把记录放回 send=0，从而释放发送窗口；历史实现直接 return 0 → 窗口里 10 条一直
+    ///    未确认时重排队永远不执行 → 死锁）。无到期候选时依旧不发 STATUS；
     /// 3) 窗口未满且在工作时间 → 发 <b>1 条</b> STATUS-REQUEST；
     /// 4) 只有该记录所在节点满足 Mode=ON + Status∈{G,Y} + ErrorCode 在允许列表 → 把记录放回待发队列（send=0）；
     ///    STB（Stand-by，carriers NOT processed / Automation Map OFF）/ GTO / PA / OFF / FR / SH / EXE 一律等待，不重排队；
@@ -290,14 +368,13 @@ public class DisposeSampleWorker : BackgroundService
         if (_dc.ResendIntervalMinutes <= 0) return 0;        // 0 = 关闭重排队
         if (!_db.ResendColumnReady) { WarnResendColumnNotReady(); return 0; }
 
-        // 2) 发送窗口满 → 等待（不发任何指令，含 STATUS-REQUEST）
+        // 2) 发送窗口满 → **不再提前返回**：窗口满时更需要重排队来释放窗口（见方法注释）。
+        //    只记日志，继续走候选查询；没有到期候选时仍然不发 STATUS（见第 3 步）。
         var window = _dc.MaxOnetimeSelectDiscardCount;      // <=0 视为不限
         var inFlight = await _db.CountPendingConfirmAsync();
-        if (window > 0 && inFlight >= window)
-        {
-            LogRequeueSkip($"dispose window full: inFlight={inFlight}/{window} → wait (no STATUS sent)");
-            return 0;
-        }
+        var windowFull = window > 0 && inFlight >= window;
+        if (windowFull)
+            LogRequeueSkip($"dispose window full: inFlight={inFlight}/{window} → requeue still allowed to free it (no new COMMENT)");
 
         // 3) 到期候选：send=1 & disposed=0 & send_time <= now-ResendIntervalMinutes & resend_count < MaxResendCount
         var cutoff = DateTime.Now.AddMinutes(-_dc.ResendIntervalMinutes).ToString("yyyyMMddHHmmss");
@@ -353,8 +430,9 @@ public class DisposeSampleWorker : BackgroundService
         // 6) 放回待发队列（send=0）；真正发送由正常状态机按窗口一条条发
         var affected = await _db.RequeueForResendAsync(requeue);
         _logger.LogInformation(
-            "Requeued {Count} record(s) for resend (window inFlight={InFlight}/{Window}); state machine will send one by one",
-            affected, inFlight, window > 0 ? window.ToString() : "unlimited");
+            "Requeued {Count} record(s) for resend (window inFlight={InFlight}/{Window}{WindowNote}); state machine will send one by one",
+            affected, inFlight, window > 0 ? window.ToString() : "unlimited",
+            windowFull ? ", window full but requeue allowed to free it" : "");
         return affected;
     }
 
@@ -632,6 +710,16 @@ public class DisposeSampleWorker : BackgroundService
             return;     // 状态保持 Ready，下一轮再检查
         }
 
+        // ===== 快速填窗分支（EnableFastFill=true 且窗口 > 0）=====
+        // 一个 tick 内连续发 COMMENT 直到窗口满，不再每条等确认；确认改由批量确认（MaybeFastConfirmAsync）负责。
+        // 窗口 <= 0（不限）时**不走**本分支（避免一次发几百条）→ 退回下面 1.0.6.7 的单条路径。
+        if (_dc.EnableFastFill && window > 0)
+        {
+            await HandleReadyFastFillAsync(window, inFlight, ct);
+            return;
+        }
+
+        // ===== 以下为 1.0.6.7 原路径（EnableFastFill=false 或窗口 <= 0）：行为一行未改 =====
         var response = await _commands.SendStatusRequestAsync(ct);
         if (response == null || !response.StartsWith("STATUS"))
         {
@@ -705,8 +793,154 @@ public class DisposeSampleWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// 快速填窗：一个 tick 内<b>连续</b>发 COMMENT 直到发送窗口满（不再每条等确认）。
+    /// <para>
+    /// 逐条判定与 1.0.6.7 的单条路径完全一致（未知节点 skip / 节点未就绪等待 / 空条码跳过 / 投递失败停 / DB 写入失败停），
+    /// 区别只在「发完一条不等确认，直接取下一条」。
+    /// </para>
+    /// <para>
+    /// 状态机：<b>不进入 Ack</b>（保持 Ready，等批量确认释放窗口后再补发）；队列取空时转 None。
+    /// </para>
+    /// <para>
+    /// 迭代上限：单轮最多跳过 <see cref="FastFillMaxSkipsPerTick"/> 条未知节点记录
+    /// （节点号配错时防止一个 tick 遍历整个待发队列 → 长时间占用 tick）；达到上限打 Warning 并结束本轮。
+    /// 每条 COMMENT 之间等 <see cref="ClampFastFillIntervalMs"/> 钳制后的间隔（0~5000ms）。
+    /// </para>
+    /// </summary>
+    private async Task HandleReadyFastFillAsync(int window, int inFlight, CancellationToken ct)
+    {
+        var sent = 0;
+        var skipped = 0;
+        while (true)
+        {
+            var response = await _commands.SendStatusRequestAsync(ct);
+            if (response == null || !response.StartsWith("STATUS"))
+            {
+                _logger.LogWarning("STATUS check failed: {Resp}", response);
+                break;
+            }
+
+            var record = await _db.SelectOneSendRecordAsync();
+            if (record == null)
+            {
+                _logger.LogInformation("No pending records → None");
+                _state = SysStatus.None;
+                break;
+            }
+
+            // 节点判定（与单条路径完全一致）
+            var nodeId = GetNodeIdFromLocation(record.Location);
+            var nodeUnknown = string.IsNullOrEmpty(nodeId) || !_aptio.SrmNodeIds.Contains(nodeId);
+            if (nodeUnknown)
+            {
+                if (_dc.SkipOnUnknownNode)
+                {
+                    _logger.LogWarning("Record {Barcode} node '{Node}' not found in configured nodes, skipping", record.Barcode, nodeId);
+                    // 推进队首：标记 skip（send=2 sentinel），否则该记录永远停在队首，阻塞后续所有记录
+                    var skipOk = await _db.UpdateStatusAsync(record.Barcode!, "skip");
+                    if (!skipOk)
+                    {
+                        await ReportStatusUpdateFailureAsync("skip", record.Barcode!,
+                            "record stays at queue head (send=0) and will be retried; queue may be blocked");
+                        break;      // 失败 → 停止（否则会反复取到同一条 → 死循环）
+                    }
+                    // skip 成功 → 队首已推进，等间隔后继续下一条
+                    skipped++;
+                    if (skipped >= FastFillMaxSkipsPerTick)
+                    {
+                        // 单轮跳过条数达上限 → 打 Warning 并结束本轮（下一轮继续），
+                        // 避免节点号配错时一个 tick 长时间占用（健康/补查/重排队停摆）。
+                        _logger.LogWarning(
+                            "Fast-fill skipped {Skipped} record(s) this tick → pause this round to avoid long tick occupancy (skip limit {Limit})",
+                            skipped, FastFillMaxSkipsPerTick);
+                        break;
+                    }
+                    // skip 不是发送：不必等完整的发送间隔（默认 1s），只等一个较小的固定延迟
+                    await DelayFastFillSkipAsync(ct);
+                    continue;
+                }
+                // SkipOnUnknownNode=false：跳过 IsNodeReady 判定直接下发（"照发不误"）
+                _logger.LogWarning("Record {Barcode} node '{Node}' not in configured nodes (SkipOnUnknownNode=false), " +
+                    "disposing anyway without node-ready check", record.Barcode, nodeId);
+            }
+            else if (!_statusDecoder.IsNodeReady(response, nodeId, _allowErrors, _dc.AllowStandbyDispose))
+            {
+                // 已知节点但未就绪 → 保持队首顺序，下一轮再试（不能跳过，否则打乱顺序）
+                _logger.LogInformation("Node {Node} not ready, skipping", nodeId);
+                break;
+            }
+            // 测试开关放行提示（仅当 AllowStandbyDispose=true 且该节点是 STB / Pink 时打印）
+            LogStandbyAllowedIfAny(response, nodeId);
+
+            _preBarcode = record.Barcode;
+            if (string.IsNullOrEmpty(_preBarcode))
+            {
+                _logger.LogWarning("Record has no barcode, skipping");
+                break;      // 空条码 → 停止（否则会反复取到同一条 → 死循环）
+            }
+            // 成功 = 命令已投递（Host LIS 的 COMMENT S002 / ORDER 无 ACK，手册 §8.59 / §9.3）
+            var delivered = await _commands.SendDisposeAsync(_preBarcode, ct);
+            if (!delivered)
+            {
+                _logger.LogWarning("Dispose not delivered: {Barcode}", record.Barcode);
+                break;
+            }
+
+            var sendOk = await _db.UpdateStatusAsync(record.Barcode!, "send");
+            if (!sendOk)
+            {
+                // DB 写入失败：记录仍是 send=0 → 停止本轮（不再继续发下一条），下一轮重试
+                await ReportStatusUpdateFailureAsync("send", record.Barcode!,
+                    "command was ALREADY delivered but DB still shows send=0 - the same record may be re-sent next cycle");
+                break;
+            }
+
+            sent++;
+            inFlight++;
+            if (window > 0 && inFlight >= window) break;      // 窗口满 → 停（由批量确认释放后再补发）
+            await DelayFastFillAsync(ct);
+        }
+
+        if (sent > 0)
+            _logger.LogInformation("Fast-fill sent {Sent} record(s), inFlight={InFlight}/{Window}",
+                sent, inFlight, window);
+    }
+
+    // 快速填窗时每条 COMMENT 之间的间隔（FastFillIntervalMs；0 = 不等待）
+    // 间隔经 ClampFastFillIntervalMs 钳制到 0~5000ms —— 代码硬上限 5000ms，防止单 tick 长时间阻塞。
+    // 取消时<b>抛出</b> OperationCanceledException（不再吞掉）：让快速填窗循环立即退出，
+    // 不在已经取消的 token 上继续跑（否则取消后还会再做一轮）。
+    private async Task DelayFastFillAsync(CancellationToken ct)
+    {
+        var ms = ClampFastFillIntervalMs(_dc.FastFillIntervalMs);
+        if (ms <= 0) return;
+        await Task.Delay(ms, ct);
+    }
+
+    // skip 成功后的等待：skip 不是发送，不必等完整的发送间隔（FastFillIntervalMs，默认 1s）。
+    // 只等一个较小的固定延迟（FastFillSkipDelayMs=100ms）；FastFillIntervalMs=0（明确要求不等待）→ 不等待。
+    // 每次循环仍有 1 次 STATUS 往返 → 不会把 CPU 打满。
+    private async Task DelayFastFillSkipAsync(CancellationToken ct)
+    {
+        var ms = ClampFastFillIntervalMs(_dc.FastFillIntervalMs);
+        if (ms <= 0) return;
+        if (ms > FastFillSkipDelayMs) ms = FastFillSkipDelayMs;
+        await Task.Delay(ms, ct);
+    }
+
     public async Task HandleAckAsync(CancellationToken ct = default)
     {
+        // 快速填窗模式（运行中切开关的兜底）：确认已改为批量（MaybeFastConfirmAsync），不再逐条查；
+        // 直接转 None → 下一轮 None/Ready 会走快速路径补发。
+        // 但窗口 <= 0（不限）时「发送」走的是 1.0.6.7 的单条路径（HandleReady 不进快速填窗分支），
+        // 此时确认也必须走原来的逐条确认：否则 MaxWaitDiscardCount 失效、记录会一直停在 send=1 未确认。
+        if (_dc.EnableFastFill && _dc.MaxOnetimeSelectDiscardCount > 0)
+        {
+            _state = SysStatus.None;
+            return;
+        }
+
         if (string.IsNullOrEmpty(_preBarcode))
         {
             _state = SysStatus.Dispose;

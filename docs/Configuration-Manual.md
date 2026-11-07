@@ -145,6 +145,64 @@ HH:MM-HH:MM,threshold;HH:MM-HH:MM,threshold;...
 | `6` | 星期六 |
 | `7` | 星期日 |
 
+#### 快速填窗（可选，默认关闭）
+
+> 适用路径：`Aptio:DisposeSample:*`（权威字段清单见《配置参考》）。
+> **默认关闭** —— 不配置 / 不开启时，丢弃状态机的行为与 1.0.6.7 **完全一致**（一条一条发、逐条确认）。
+
+**配置片段**（`appsettings.json`）：
+
+```json
+{
+  "Aptio": {
+    "DisposeSample": {
+      "EnableFastFill": true,
+      "FastFillIntervalMs": 1000,
+      "FastFillConfirmIntervalSeconds": 5
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 默认值 | 范围 | 说明 |
+|------|------|--------|------|------|
+| `Aptio:DisposeSample:EnableFastFill` | boolean | `false` | — | 快速填窗总开关。**默认关闭** |
+| `Aptio:DisposeSample:FastFillIntervalMs` | integer | `1000` | `0~5000`（**代码硬钳制**） | 每条 `COMMENT` 之间的间隔（毫秒）；`0` = 不等待（连发） |
+| `Aptio:DisposeSample:FastFillConfirmIntervalSeconds` | integer | `5` | `1~60`（**代码硬钳制**） | 批量确认间隔（秒）：每该秒用一条 SQL 确认所有在途记录 |
+
+> 🔒 **范围以代码为准**：页面上的 `max` 只是输入提示，直接改 `appsettings.json` 也会被代码钳制到上表范围。
+> `FastFillIntervalMs` 上限 **5000ms** —— **代码硬上限 5000ms，防止单 tick 长时间阻塞**（写成 600000 会让一个 tick 卡约 100 分钟）。
+> `FastFillConfirmIntervalSeconds`：写 `0` 按 `1` 秒，写 `999` 按 `60` 秒。
+
+**开启后的行为**：
+
+1. **一个 tick 内连续发送**：进入 `Ready` 后连续下发 `COMMENT S002 … TRASH`，直到发送窗口满为止，
+   **不再每条都等确认**；发送窗口上限仍是 `MaxOnetimeSelectDiscardCount`（默认 **10** 条）。
+2. **每条间隔 1 秒**：`FastFillIntervalMs`（默认 `1000` 毫秒）控制两条 `COMMENT` 之间的等待；
+   设成 `0` 表示**不等待**（注意：`0` 只是不等待，**不是**关闭快速填窗 —— 开关只有 `EnableFastFill`）。
+3. **确认改为批量**：每 `FastFillConfirmIntervalSeconds`（默认 **5** 秒）用**一条** SQL 确认所有
+   `send=1 & disposed=0` 的在途记录，命中（位置已变为 `&3-{node}-%`）即置 `disposed=1`，释放发送窗口。
+4. 逐条判定口径不变：未知节点按 `SkipOnUnknownNode` 处理、节点未就绪（`OFF`/`STB`/`GTO` 等）等待、
+   投递失败或 DB 写入失败即停止本轮（并记 Error + 健康 degraded）。
+5. 窗口 `<= 0`（不限）时**不走**快速填窗，仍按一条一条发；此时确认也仍走原来的**逐条确认**
+   （`MaxWaitDiscardCount` 继续生效）。
+6. 未知节点 `skip` **单轮最多 200 条**：达到上限打 Warning「本轮跳过 N 条后暂停」并结束本轮，
+   下一轮继续 —— 避免节点号配错（如 `18` vs `018`）时一个 tick 遍历整个待发队列。
+
+**风险提示**：
+
+- 短时间内会连续下发多条 `COMMENT`（默认 10 条、间隔 1 秒）；**现场开启前请先在 Host LIS / 冰箱侧验证**
+  连续丢弃指令是否被接受、是否会互相干扰。
+- 确认由「逐条」改为「批量」后，单条样本的丢弃结果反馈会延迟**默认 5 秒，实际受 `LoopIntervalSeconds` 影响约 5~8 秒**。
+- 快速填窗期间状态机**不进入 `Ack`**（保持 `Ready`），页面上的「在途/待确认」计数会短时间偏高。
+- 建议先在测试环境打开并观察日志（`Fast-fill sent N record(s)` / `Fast-fill confirm: N …`），
+  确认 Host LIS 与冰箱侧无异常后再考虑现场启用；出现异常把 `EnableFastFill` 改回 `false` 即恢复原行为（热生效）。
+
+> ⚠️ **重排队死锁修复对默认现场（`EnableFastFill=false`）同样生效**（不受快速填窗开关控制）：
+> 窗口满（`inFlight >= 窗口`）**且有到期候选**时，会发 **1 条** `STATUS-REQUEST` 并把到期记录放回 `send=0` 以释放窗口
+> —— 这**可能比 1.0.6.7 更早重发未确认记录**（即出现**重复 `COMMENT`**）。
+> 现场启用前请先在**测试环境**验证「慢冰箱 / 节点未就绪」场景下的重复 `COMMENT` 是否可接受。
+
 ### Deliver — 标本递送
 
 | 路径 | 类型 | 默认值 | 说明 |
