@@ -15,6 +15,9 @@ public class DisposeDatabaseService : IDisposeDatabaseService
     private readonly MySqlConnectionFactory _factory;
     private readonly IOptionsMonitor<AptioConfig>? _aptio;
 
+    // 按架查询失败 → 退回原查询时的告警节流：10 分钟最多一条 Warning
+    private DateTime _lastRackWarnUtc = DateTime.MinValue;
+
     public DisposeDatabaseService(ILogger<DisposeDatabaseService> logger, MySqlConnectionFactory factory)
         : this(logger, factory, null)
     {
@@ -155,6 +158,75 @@ public class DisposeDatabaseService : IDisposeDatabaseService
         return count;
     }
 
+    /// <summary>
+    /// 架键表达式（SQL 片段，MySQL）：由 <c>location</c> 推出"架"。
+    /// <list type="bullet">
+    ///   <item><c>&amp;1-{节点}-{架号}-{层}-{槽}-{位}</c>（6 段） → <c>&amp;1-{节点}-{架号}</c>（如 <c>&amp;1-13-000078-05-14-01</c> → <c>&amp;1-13-000078</c>）</item>
+    ///   <item><c>&amp;2-{节点}-000000-00-{槽}-{位}</c>（6 段） → <c>&amp;2-{节点}-{槽}</c>（真正的架/槽在第 5 段，如 <c>&amp;2-01-000000-00-18-01</c> → <c>&amp;2-01-18</c>）</item>
+    ///   <item><c>&amp;3-*</c>（已丢弃/归档哨兵） → NULL（**排除**，不参与按架排序）</item>
+    ///   <item><c>&amp;0-*</c>、NULL、其它前缀、**段数不足 6 段的短格式** → <c>'~other'</c>（**保留**，归入"其它"组，排最后，<b>不静默丢弃</b>）</item>
+    /// </list>
+    /// <para>
+    /// 段数判断用 <c>LIKE '&amp;1-%-%-%-%-%'</c>（5 个 '-' → 6 段），
+    /// 与 <see cref="GetLocationRackNo"/> 的 <c>parts.Length &lt; 6</c> 守卫**同口径**：
+    /// 短格式（如 <c>&amp;1-13-000078</c>、<c>&amp;2-01-000000-00</c>）两侧都**不产生错误架键**
+    /// —— SQL 归 <c>'~other'</c>，C# 返回 <c>""</c>，两者都是"不丢弃"，可接受。
+    /// </para>
+    /// 与 <see cref="GetLocationRackNo"/> 保持同一口径（C# 侧与 SQL 侧）。
+    /// </summary>
+    public const string DisposeRackKeyExpression = """
+CASE
+  WHEN location LIKE '&1-%-%-%-%-%' THEN CONCAT('&1-', SUBSTRING_INDEX(SUBSTRING_INDEX(location,'-',2),'-',-1), '-', SUBSTRING_INDEX(SUBSTRING_INDEX(location,'-',3),'-',-1))
+  WHEN location LIKE '&2-%-%-%-%-%' THEN CONCAT('&2-', SUBSTRING_INDEX(SUBSTRING_INDEX(location,'-',2),'-',-1), '-', SUBSTRING_INDEX(SUBSTRING_INDEX(location,'-',5),'-',-1))
+  WHEN location LIKE '&3-%' THEN NULL
+  ELSE '~other'
+END
+""";
+
+    /// <summary>
+    /// 构造"取丢弃候选"的 SQL。
+    /// <para>
+    /// <paramref name="byRack"/> = false → 原顺序：<c>SELECT * FROM {safeName} LIMIT @Max</c>（行为与 1.0.7.0 完全一致）。
+    /// <paramref name="byRack"/> = true → 按架排序：先按架统计（合格条数 / 最早 update_time），
+    /// 再把样本按"合格数降序、最早时间升序、location 升序"排序后取前 N 条，
+    /// 使窗口内的 N 条**尽量来自同一架**。
+    /// </para>
+    /// <para>
+    /// 排序口径（<b>架组优先、其它组最后</b>）：
+    /// <c>ORDER BY CASE WHEN r.uni_rack_key = '~other' THEN 1 ELSE 0 END ASC, r.cnt DESC, r.oldest ASC, v.location ASC</c>
+    /// —— 第一个条件把"其它组"（<c>&amp;0</c> / NULL / 短格式等）**一律压到最后**，
+    /// 避免它们因"条数多"（<c>cnt DESC</c>）而挤掉真正的架；
+    /// <c>r.oldest</c>（架级最早 update_time）只决定**架与架之间**的先后，
+    /// 同架内由 <c>v.location</c> 升序决定（位置 01→48）。
+    /// </para>
+    /// <para>
+    /// <paramref name="safeName"/> 必须已通过 <see cref="SanitizeSqlName"/> 白名单（<c>schema.view</c> 亦可）。
+    /// </para>
+    /// </summary>
+    public static string BuildDisposeSamplesSql(string safeName, bool byRack)
+    {
+        if (!byRack) return $"SELECT * FROM {safeName} LIMIT @Max";
+        return $"""
+SELECT v.*
+FROM (
+  SELECT z.*, {DisposeRackKeyExpression} AS uni_rack_key
+  FROM {safeName} z
+) v
+JOIN (
+  SELECT uni_rack_key, COUNT(*) AS cnt, MIN(update_time) AS oldest
+  FROM (
+    SELECT update_time, {DisposeRackKeyExpression} AS uni_rack_key
+    FROM {safeName} z
+  ) t
+  WHERE uni_rack_key IS NOT NULL
+  GROUP BY uni_rack_key
+) r ON r.uni_rack_key = v.uni_rack_key
+WHERE v.uni_rack_key IS NOT NULL
+ORDER BY CASE WHEN r.uni_rack_key = '~other' THEN 1 ELSE 0 END ASC, r.cnt DESC, r.oldest ASC, v.location ASC
+LIMIT @Max
+""";
+    }
+
     public async Task<List<SampleRecord>> GetDisposeSamplesAsync(int cmdType, string cmdName, int maxCount)
     {
         // 先做名称白名单校验（M-05）：不合法 → 直接拒绝，**不连库、不发任何 SQL**。
@@ -176,14 +248,42 @@ public class DisposeDatabaseService : IDisposeDatabaseService
 
         List<SampleRecord> samples;
         if (cmdType == 0)
-            samples = (await conn.QueryAsync<SampleRecord>(
-                $"SELECT * FROM {safeName} LIMIT @Max", new { Max = maxCount })).AsList();
+        {
+            // 按架排序（默认开启）：只改"候选顺序"，窗口条数不变（仍由调用方的 MaxOnetimeSelectDiscardCount 决定）。
+            var byRack = _aptio?.CurrentValue?.DisposeSample?.DisposeByRack ?? true;
+            try
+            {
+                samples = (await conn.QueryAsync<SampleRecord>(
+                    BuildDisposeSamplesSql(safeName, byRack), new { Max = maxCount })).AsList();
+            }
+            catch (Exception ex) when (byRack)
+            {
+                // 兼容兜底：视图列名/MySQL 版本不支持时，退回原查询，绝不让丢弃停摆
+                WarnRackQueryFallback(ex);
+                samples = (await conn.QueryAsync<SampleRecord>(
+                    $"SELECT * FROM {safeName} LIMIT @Max", new { Max = maxCount })).AsList();
+            }
+        }
         else
+        {
+            // 存储过程模式：排序由数据库侧自行决定，DisposeByRack 不生效（仅提示，不报错）
+            _logger.LogDebug("GetDisposeSamples: stored procedure mode ({CmdName}) — DisposeByRack does not apply", cmdName);
             samples = (await conn.QueryAsync<SampleRecord>(
                 safeName, commandType: CommandType.StoredProcedure)).AsList();
+        }
 
         _logger.LogInformation("GetDisposeSamples returned {Count}", samples.Count);
         return samples;
+    }
+
+    // 按架查询失败（视图列名不匹配 / MySQL 版本不支持等）→ 退回原查询时的告警节流：10 分钟最多一条 Warning
+    private void WarnRackQueryFallback(Exception ex)
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastRackWarnUtc).TotalMinutes < 10) return;
+        _lastRackWarnUtc = now;
+        _logger.LogWarning(ex,
+            "rack-aware query failed, fallback to plain view query; disposal continues");
     }
 
     public async Task<int> InsertDisposeRecordsAsync(int needCount, List<SampleRecord> samples)
@@ -646,11 +746,30 @@ public class DisposeDatabaseService : IDisposeDatabaseService
         return (await conn.QueryAsync<SampleRecord>(sql, p)).AsList();
     }
 
-    private static string GetLocationRackNo(string? loc)
+    /// <summary>
+    /// 由 <c>t_location</c> 推出**架键**（与 <see cref="DisposeRackKeyExpression"/> 的 SQL 侧口径一致）。
+    /// <list type="bullet">
+    ///   <item><c>&amp;1-{节点}-{架号}-{层}-{槽}-{位}</c>（6 段） → <c>&amp;1-{节点}-{架号}</c>（如 <c>&amp;1-13-000078-05-14-01</c> → <c>&amp;1-13-000078</c>）</item>
+    ///   <item><c>&amp;2-{节点}-000000-00-{槽}-{位}</c>（6 段） → <c>&amp;2-{节点}-{槽}</c>（架/槽在第 5 段，如 <c>&amp;2-01-000000-00-18-01</c> → <c>&amp;2-01-18</c>）</item>
+    ///   <item><c>&amp;3-*</c>（已丢弃/归档哨兵）、<c>&amp;0-*</c>、NULL、其它前缀 → <c>""</c>（排除）</item>
+    ///   <item><b>段数不足 6 段的短格式</b>（如 <c>&amp;1-13-000078</c>、<c>&amp;2-01-000000-00</c>） → <c>""</c>（排除）</item>
+    /// </list>
+    /// <para>
+    /// 6 段守卫（<c>parts.Length &lt; 6</c>）与 SQL 侧的 <c>LIKE '&amp;1-%-%-%-%-%'</c> <b>同口径</b>：
+    /// 短格式在 SQL 侧归 <c>'~other'</c>（保留、排最后），在 C# 侧返回 <c>""</c>，
+    /// 两侧都**不会产生错误的架键**，也都**不丢弃**该样本（可接受）。
+    /// </para>
+    /// </summary>
+    public static string GetLocationRackNo(string? loc)
     {
         if (string.IsNullOrEmpty(loc)) return "";
         var parts = loc.Split('-');
-        return parts.Length > 2 ? parts[2].Trim() : "";
+        // 必须 6 段（&1-{节点}-{架号}-{层}-{槽}-{位} / &2-{节点}-000000-00-{槽}-{位}）
+        // —— 与 SQL 侧 LIKE '&1-%-%-%-%-%' 的 5 个 '-' 对齐，避免短格式被截成错误架键。
+        if (parts.Length < 6) return "";
+        if (parts[0] == "&1") return $"&1-{parts[1]}-{parts[2]}";
+        if (parts[0] == "&2") return $"&2-{parts[1]}-{parts[4]}";
+        return "";   // &3 / &0 / 其它
     }
 
     /// <summary>

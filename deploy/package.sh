@@ -3,7 +3,7 @@
 #
 # 用法：
 #   APP_SETTINGS=/path/to/site-appsettings.json ./deploy/package.sh
-#   VERSION=1.0.7.0 OUT=/path/out ./deploy/package.sh
+#   VERSION=1.0.7.1 OUT=/path/out ./deploy/package.sh
 #
 # 环境变量：
 #   VERSION       覆盖版本号（默认取 UniFlow.csproj 的 <Version>）
@@ -54,6 +54,7 @@ cp -f  "$STAGE/pub-linux-x64/UniFlow.staticwebassets.endpoints.json" "$LINUX/uni
 cp -rf "$STAGE/pub-linux-x64/wwwroot"                          "$LINUX/uniflow/"
 cp -f  "$APP_SETTINGS"                                         "$LINUX/uniflow/appsettings.json"
 cp -f  "$ROOT/docs/CONFIG-REFERENCE.md"                        "$LINUX/uniflow/"
+cp -f  "$ROOT/docs/UniFlow-使用说明书.md"                        "$LINUX/uniflow/使用说明书.md"
 cp -f  "$ROOT/deploy/INSTALL.md"                               "$LINUX/uniflow/"
 cp -f  "$ROOT/deploy/linux/README.md"                          "$LINUX/uniflow/README.md"
 cp -f  "$ROOT/deploy/linux/install.sh"                         "$LINUX/uniflow/"
@@ -68,6 +69,7 @@ cp -f  "$STAGE/pub-win-x64/web.config"                         "$WIN/uniflow/"
 cp -rf "$STAGE/pub-win-x64/wwwroot"                            "$WIN/uniflow/"
 cp -f  "$APP_SETTINGS"                                         "$WIN/uniflow/appsettings.json"
 cp -f  "$ROOT/docs/CONFIG-REFERENCE.md"                        "$WIN/uniflow/"
+cp -f  "$ROOT/docs/UniFlow-使用说明书.md"                        "$WIN/uniflow/使用说明书.md"
 cp -f  "$ROOT/deploy/INSTALL.md"                               "$WIN/uniflow/"
 cp -f  "$ROOT/deploy/windows/README.md"                        "$WIN/uniflow/README.md"
 cp -f  "$ROOT/deploy/windows/install.ps1"                      "$WIN/uniflow/"

@@ -25,6 +25,14 @@ UniFlow/
 | DMSAutoOrder | DMS 自动下单 |
 | WebAdmin | Web 管理界面 + 健康检查 |
 
+## 文档
+
+- [**UniFlow 使用说明书**](docs/UniFlow-使用说明书.md)（一册通：安装 / 配置 / WebAdmin / 样本丢弃 / 故障排查）
+- [配置参考](docs/CONFIG-REFERENCE.md)（逐字段权威清单）
+- [配置手册](docs/Configuration-Manual.md)
+- [部署指南](docs/Deployment-Guide.md)
+- [接口手册](docs/Interface-Manual.md)
+
 ## 快速开始
 
 ```bash

@@ -36,7 +36,7 @@ git push origin v${VERSION}
 APP_SETTINGS=/path/to/site-appsettings.json ./deploy/package.sh
 
 # 版本号默认取 UniFlow.csproj 的 <Version>，可覆盖
-VERSION=1.0.7.0 OUT=release ./deploy/package.sh
+VERSION=1.0.7.1 OUT=release ./deploy/package.sh
 ```
 
 产物（输出目录默认 `release/`）：
@@ -66,25 +66,26 @@ dotnet publish UniFlow/UniFlow.csproj \
 历史教训：**1.0.5.5 ~ 1.0.6.5 的 Linux 包漏了 `README.md` / `INSTALL.md`**（`package.sh` Linux 段漏 `cp`，直到 1.0.6.5 才修复）。每次打包后必须跑：
 
 ```bash
-VERSION="1.0.7.0"
-# 两包文档清单齐备（各 3 份：README.md / INSTALL.md / CONFIG-REFERENCE.md）
+VERSION="1.0.7.1"
+# 两包文档清单齐备（各 4 份：README.md / INSTALL.md / CONFIG-REFERENCE.md / 使用说明书.md）
 tar -tzf release/UniFlow-${VERSION}-linux-x64.tar.gz | grep -E '\.md$'
 unzip -l release/UniFlow-${VERSION}-win-x64.zip | grep -E '\.md$'
 # 平台共用文档逐字节一致
 mkdir -p /tmp/pkgchk/{linux,win}
-tar -xzf release/UniFlow-${VERSION}-linux-x64.tar.gz -C /tmp/pkgchk/linux uniflow/INSTALL.md uniflow/CONFIG-REFERENCE.md
-unzip -oq release/UniFlow-${VERSION}-win-x64.zip -d /tmp/pkgchk/win uniflow/INSTALL.md uniflow/CONFIG-REFERENCE.md
+tar -xzf release/UniFlow-${VERSION}-linux-x64.tar.gz -C /tmp/pkgchk/linux uniflow/INSTALL.md uniflow/CONFIG-REFERENCE.md 'uniflow/使用说明书.md'
+unzip -oq release/UniFlow-${VERSION}-win-x64.zip -d /tmp/pkgchk/win uniflow/INSTALL.md uniflow/CONFIG-REFERENCE.md 'uniflow/使用说明书.md'
 cmp /tmp/pkgchk/linux/uniflow/INSTALL.md /tmp/pkgchk/win/uniflow/INSTALL.md && echo INSTALL_OK
 cmp /tmp/pkgchk/linux/uniflow/CONFIG-REFERENCE.md /tmp/pkgchk/win/uniflow/CONFIG-REFERENCE.md && echo CONFREF_OK
+cmp '/tmp/pkgchk/linux/uniflow/使用说明书.md' '/tmp/pkgchk/win/uniflow/使用说明书.md' && echo MANUAL_OK
 ```
 
-期望：两包各含 3 份 `.md`；`INSTALL_OK`、`CONFREF_OK` 均输出。
-文档源文件位置：`deploy/INSTALL.md`（双平台共用）、`docs/CONFIG-REFERENCE.md`（双平台共用）、`deploy/linux/README.md` 与 `deploy/windows/README.md`（平台专属，改一处记得评估另一处是否同步）。
+期望：两包各含 4 份 `.md`；`INSTALL_OK`、`CONFREF_OK`、`MANUAL_OK` 均输出。
+文档源文件位置：`deploy/INSTALL.md`（双平台共用）、`docs/CONFIG-REFERENCE.md`（双平台共用）、`docs/UniFlow-使用说明书.md`（双平台共用，打包时重命名为 `使用说明书.md`）、`deploy/linux/README.md` 与 `deploy/windows/README.md`（平台专属，改一处记得评估另一处是否同步）。
 
 ### 3. 发布到 GitHub
 
 ```bash
-VERSION="1.0.7.0"
+VERSION="1.0.7.1"
 
 # 打 Tag
 git tag -a v${VERSION} -m "v${VERSION} - 版本说明"
@@ -121,7 +122,7 @@ md5sum release/UniFlow-${VERSION}-*.{tar.gz,zip} /mnt/nasbk/UniFlow/UniFlow-${VE
 - [ ] `deploy/build.sh` 的 `VERSION` 已同步
 - [ ] 配置/改动记录文件已更新 (`docs/CHANGELOG-<VERSION>.md`)
 - [ ] `./deploy/package.sh` 已产出 Linux / Windows 双平台安装包
-- [ ] **打包产物自检通过（第 2 步：两包各 3 份 `.md` + 共用文档 `cmp` 一致）**
+- [ ] **打包产物自检通过（第 2 步：两包各 4 份 `.md` + 共用文档 `cmp` 一致）**
 - [ ] Tag 已推送
 - [ ] Release 已创建并上传附件
 - [ ] **安装包已同步 NAS 且 md5 校验一致，改动记录已放 NAS**

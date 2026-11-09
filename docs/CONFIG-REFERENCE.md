@@ -86,6 +86,7 @@
 | `DisposeSample.LoopIntervalSeconds` | int | `3` | 循环间隔(秒) |
 | `DisposeSample.MaxWaitDiscardCount` | int | `2` | 最大等待确认次数 |
 | `DisposeSample.MaxOnetimeSelectDiscardCount` | int | `10` | 单次最大选择丢弃数；**同时是发送窗口**（未丢弃总数上限） |
+| `DisposeSample.DisposeByRack` | bool | `true` | **按架排序丢弃（默认开启）**。`true` = 视图模式下候选按"架"排序：**合格样本最多、最老的架优先**，窗口 N 条尽量来自同一架；架键规则：`&1-{节点}-{架号}`、`&2-{节点}-{槽}`（均要求 6 段），`&3`（已丢弃哨兵）**排除**，`&0`/NULL/短格式归 `~other` 组**保留并排最后**（不静默丢弃）。`false` = 恢复原顺序 `SELECT * FROM <视图> LIMIT N`（可随时回退）。**只改候选顺序**，不改窗口/发送/重排队逻辑（窗口仍是 `MaxOnetimeSelectDiscardCount`，默认 10）；按架 SQL 执行失败时**自动回退原查询**（Warning 节流），丢弃不停摆。仅对 `CommandType=0`（视图）生效，存储过程模式排序由数据库侧决定。热生效 |
 | `DisposeSample.EnableFastFill` | bool | `false` | **快速填窗开关，默认关闭**。关闭（默认）= 行为与 1.0.6.7 完全一致（一条一条发、逐条确认）。开启 = 一个 tick 内连续发 `COMMENT` 直到发送窗口满（窗口上限仍是 `MaxOnetimeSelectDiscardCount`，默认 10），不再每条等确认；确认改为**批量**（`FastFillConfirmIntervalSeconds`）。热生效 |
 | `DisposeSample.FastFillIntervalMs` | int | `1000` | 快速填窗时每条 `COMMENT` 之间的间隔（毫秒，范围 `0~5000`，**代码硬钳制**）；`0` = 不等待（连发）。**注意：`0` 只是不等待，不是关闭快速填窗**——开关只有 `EnableFastFill`。仅在 `EnableFastFill=true` 时生效。热生效 |
 | `DisposeSample.FastFillConfirmIntervalSeconds` | int | `5` | 快速填窗的**批量确认**间隔（秒，范围 `1~60`，**代码硬钳制**）：每该秒用**一条** SQL 确认所有 `send=1 & disposed=0` 的在途记录，命中即置 `disposed=1` 并释放发送窗口。仅在 `EnableFastFill=true` 时生效。热生效 |
@@ -178,6 +179,51 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 | 取数方式 | `Aptio.DisposeSample.CommandType` = `0` → 视图（`SELECT * FROM <CommandName>`）；非 0 → 存储过程（`CommandType` 作为命令类型调用） |
 | 默认命令名 | `view_overtimestoragesample` |
 | 「超期」年龄条件 | **由数据库侧的视图 / 存储过程定义，UniFlow 不定义也不校验**。现场须用 `SHOW CREATE VIEW view_overtimestoragesample;`（或对应的 `SHOW CREATE PROCEDURE`）核对「超期」判定条件与字段口径 |
+| 候选顺序（按架排序） | `Aptio.DisposeSample.DisposeByRack`（默认 `true`）→ 视图模式下按"架"排序，详见 §2.1 |
+
+### 2.1 按架排序（`DisposeByRack`，默认开启）
+
+**只改「候选顺序」，不改窗口 / 发送 / 重排队逻辑** —— 发送窗口仍是
+`MaxOnetimeSelectDiscardCount`（默认 **10** 条），本开关不改变窗口大小。
+
+**架键规则**（由 `t_sample.t_location` 推出；C# 与 SQL 两侧同一口径，**都要求 6 段**）：
+
+| `t_location` 形态 | 架键 | 示例 |
+|------|------|------|
+| `&1-{节点}-{架号}-{层}-{槽}-{位}` | `&1-{节点}-{架号}` | `&1-13-000078-05-14-01` → `&1-13-000078` |
+| `&2-{节点}-000000-00-{槽}-{位}` | `&2-{节点}-{槽}`（架/槽在**第 5 段**） | `&2-01-000000-00-18-01` → `&2-01-18` |
+| `&3-{节点}-000000-00-00-00`（已丢弃/归档哨兵） | — | **排除**（不返回） |
+| `&0-…`（特殊/未定位）、`NULL`、其它前缀、**段数不足 6 段的短格式**（如 `&1-13-000078`、`&2-01-000000-00`） | `~other`（"其它"组） | **保留**、排在最后 —— **不静默丢弃** |
+
+> 📌 短格式（段数不足 6 段）在 SQL 侧归 `~other` 组（保留、排最后），在 C# 侧 `GetLocationRackNo` 返回 `""`：
+> 两侧都**不会产生错误的架键**，也都**不丢弃**该样本 —— 口径一致、可接受。
+
+**排序规则**（架组优先、其它组最后）：
+
+1. **其它组（`~other`）一律排最后**（`&0` / `NULL` / 短格式等不参与"架优先"，但**不会被丢弃**）；
+2. **合格样本数降序**（同一架里可丢弃的样本多的架优先）—— 一次把一架子清空，避免"每架丢一条"；
+3. **该架最早 `update_time` 升序**（最老的架优先）—— **只决定架与架之间的先后**；
+4. `location` 升序（**同架内**的顺序：位置 01→48；稳定可复现）。
+
+> ⚠️ **口径提醒**：`update_time` **不参与同架内的排序**。同一架内是 **location 升序**（位置 01→48），
+> 不是"最早 `update_time` 优先"；架与架之间才是按"该架最早 `update_time`"决定先后。
+
+结果：窗口内的 N 条（默认 10）**尽量来自同一架**。
+这是**最优努力**：若某架只有部分样本合格（其余仍在 `&1`/`&2` 但不合格），则该架**先丢合格的那部分**，
+下一轮再按剩余情况重新排序 —— 不保证"整架一次性清空"。
+
+**失败回退**：按架 SQL 执行失败（视图列名不匹配、MySQL 版本不支持等）时，
+**自动退回原查询** `SELECT * FROM <视图> LIMIT @Max`，并打一条 Warning（10 分钟节流，
+内容：`rack-aware query failed, fallback to plain view query; disposal continues`）
+—— **绝不让丢弃功能停摆**。
+
+**性能提示**：按架 SQL 需要**扫描候选视图两次**（一次取样本列、一次按架聚合 `update_time`）——
+实测 14k 行视图约 **0.2~0.3 s**（原单次查询约 **0.05 s**）。对默认 **3 s** 的循环间隔可接受；
+但现场视图很大（百万行级）时，**建议先用 `EXPLAIN ANALYZE` 实测**，
+必要时临时把 `Aptio:DisposeSample:DisposeByRack` 改成 `false` 回退到单次查询（热生效，无需重启）。
+
+**适用范围**：仅对 `CommandType=0`（视图）生效。`CommandType=1`（存储过程）时排序由数据库侧决定，
+本开关**不生效**（只记 Debug 日志，不报错）。
 
 ### 3. 队列
 
@@ -201,6 +247,9 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 | `inFlight >= 窗口`（发送闸门） | **只等待**：不下发任何新 COMMENT（连 STATUS 探测都不发）；状态保持 `Ready`，下一轮再检查。**例外**：5 分钟一轮的**重排队检查**在「有到期候选」时仍可发 1 条 `STATUS-REQUEST`（见 §6） |
 | `active >= 窗口` 且无待发（插入闸门） | **不插入**新丢弃记录（`HandleNone` 保持 `None`）；本轮插入条数 = `min(need, 窗口 - active, 候选条数)` |
 | 窗口 `<= 0` | 视为**不限**（保持旧行为：不做窗口判断、插入条数 = `need`） |
+
+> 📌 **按架排序（`DisposeByRack`，默认开启）不改窗口**：窗口上限仍是 `MaxOnetimeSelectDiscardCount`（默认 **10**）。
+> 本开关只决定"候选的**顺序**"（优先取同一架的样本），见 §2.1。
 
 > 💡 **开启 `EnableFastFill` 后**（默认关闭）：窗口内**连续发送**（一个 tick 内连发 `COMMENT` 直到窗口满，
 > 每条间隔 `FastFillIntervalMs`，默认 1000ms），确认改为**批量**（`FastFillConfirmIntervalSeconds`，默认 5 秒一条 SQL）；

@@ -117,6 +117,16 @@ public class AptioDisposeSampleConfig
     // 待处理队列告警阈值：超过该数量打 Warning（每 10 分钟最多一次）；0 = 不告警
     [Restart(RestartLevel.Hot)] public int PendingWarnThreshold { get; set; } = 1000;
 
+    // ===== 按架排序（默认开启）=====
+    // true：视图模式下按"架"排序——合格样本最多、最老的架优先，窗口 N 条尽量来自同一架；
+    //       &1-{节点}-{架号}、&2-{节点}-{槽} 为架键；&3（已丢弃）/&0/NULL 排除。
+    // false：恢复原顺序 SELECT * FROM view LIMIT N（可随时回退）。
+    //
+    // 作用范围：**只改"候选顺序"**，不改窗口/发送/重排队逻辑；
+    // 窗口仍是 MaxOnetimeSelectDiscardCount（默认 10）。
+    // 仅对 CommandType=0（视图）生效；CommandType=1（存储过程）由数据库侧自行排序，本开关不生效。
+    [Restart(RestartLevel.Hot)] public bool DisposeByRack { get; set; } = true;
+
     // ===== 统一读取入口 =====
     // 语义：新格式属性 != null 即权威（空数组 = 显式清空/禁用），null 才回退旧格式字符串。
     // 三层（前端回显 / 前端变更检测 / 运行时）对该语义保持一致——见改动记录。
