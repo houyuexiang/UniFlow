@@ -904,3 +904,135 @@ test.describe('UI-9 M-07 XSS 引号/属性注入与消息转义红闸门', () =>
     st.expectClean();
   });
 });
+
+// UI-10 管理验证记忆（服务端短令牌，默认 5 分钟）
+// 口径：密码验证成功后服务端下发 X-Admin-Token（固定 5 分钟、不滑动续期）；
+//       浏览器**只存内存**（不落 localStorage/sessionStorage）→ 刷新页面即失效，
+//       下一次破坏性动作重新弹密码。
+// 红闸门：去掉服务端令牌校验 / 去掉前端令牌复用 / 令牌落盘 → 本组用例变红。
+test.describe('UI-10 管理验证记忆（短令牌，5 分钟）', () => {
+  const LOOP = 'Aptio:DisposeSample:LoopIntervalSeconds';
+  const loopInput = (page) => page.locator('.form-row', { has: page.locator('label[data-path="' + LOOP + '"]') }).locator('input').first();
+
+  test('第一次保存弹 1 次密码；5 分钟内第二次保存不再弹且成功；刷新页面后重新弹 1 次', async ({ page }) => {
+    const st = watch(page, {
+      prompt: 'accept', confirm: 'accept',
+      countMethods: ['PUT /api/config/batch', 'GET /api/auth/challenge'],
+    });
+    await page.goto('/');
+    await openTab(page, 'forms');
+    let input = loopInput(page);
+    await expect(input).toBeVisible();
+    const original = await input.inputValue();
+    const next = original === '7' ? '8' : '7';
+
+    // ① 第一次保存：恰弹 1 次密码，恰 1 次 batch 请求
+    await input.fill(next);
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    expect(st.prompts, '第一次保存应恰弹一次密码').toBe(1);
+    expect(st.reqCounts['PUT /api/config/batch'] || 0, '第一次保存应发一次批量保存').toBe(1);
+    expect(st.reqCounts['GET /api/auth/challenge'] || 0, '第一次保存取一次鉴权挑战').toBe(1);
+
+    // ② 5 分钟内第二次保存：不再弹密码（复用服务端短令牌 X-Admin-Token）
+    st.prompts = 0;
+    st.reqCounts['GET /api/auth/challenge'] = 0;
+    input = loopInput(page);                       // 保存后表单会重渲染，重新定位
+    await expect(input).toBeVisible();
+    await input.fill(original);                     // 再改一次 → 产生一次新的保存
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    expect(st.prompts, '5 分钟内第二次保存不应再弹密码').toBe(0);
+    expect(st.reqCounts['PUT /api/config/batch'] || 0, '第二次保存仍应发一次批量保存').toBe(2);
+    expect(st.reqCounts['GET /api/auth/challenge'] || 0, '第二次保存走令牌，不应再取鉴权挑战').toBe(0);
+
+    // ③ 刷新页面：内存令牌丢失 → 第一次保存重新弹 1 次密码
+    await page.reload();
+    await openTab(page, 'forms');
+    input = loopInput(page);
+    await expect(input).toBeVisible();
+    st.prompts = 0;
+    st.reqCounts['GET /api/auth/challenge'] = 0;
+    await input.fill(next);
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    expect(st.prompts, '刷新页面后第一次保存应重新弹一次密码').toBe(1);
+    expect(st.reqCounts['GET /api/auth/challenge'] || 0, '刷新后回到 nonce/hash 流程，取一次挑战').toBe(1);
+
+    // 恢复原值（不留副作用：基线配置的最终值不变）
+    input = loopInput(page);
+    await expect(input).toBeVisible();
+    await input.fill(original);
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    st.expectClean();
+  });
+
+  test('短令牌只存浏览器内存：不落 localStorage/sessionStorage', async ({ page }) => {
+    const st = watch(page, { prompt: 'accept', confirm: 'accept' });
+    await page.goto('/');
+    await openTab(page, 'forms');
+    const input = loopInput(page);
+    await expect(input).toBeVisible();
+    const original = await input.inputValue();
+
+    // 存一次 → 服务端下发短令牌
+    await input.fill(original === '7' ? '8' : '7');
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    expect(st.prompts, '第一次保存应弹一次密码').toBe(1);
+
+    // 令牌在浏览器内存里（模块级变量，非 window 属性）
+    const memToken = await page.evaluate(() => (typeof _adminToken !== 'undefined') ? _adminToken : null);
+    expect(memToken, '短令牌应存在浏览器内存（app.js 模块级变量 _adminToken）').toBeTruthy();
+
+    // 但**不能**落任何 Web Storage
+    const stored = await page.evaluate(() => ({
+      ls: JSON.stringify(window.localStorage),
+      ss: JSON.stringify(window.sessionStorage),
+    }));
+    expect(stored.ls, 'localStorage 不得落管理令牌').not.toContain('X-Admin-Token');
+    expect(stored.ss, 'sessionStorage 不得落管理令牌').not.toContain('X-Admin-Token');
+    expect(stored.ls.toLowerCase(), 'localStorage 不得含 admin token 字样').not.toContain('admintoken');
+    expect(stored.ss.toLowerCase(), 'sessionStorage 不得含 admin token 字样').not.toContain('admintoken');
+
+    // 恢复原值
+    const input2 = loopInput(page);
+    await expect(input2).toBeVisible();
+    await input2.fill(original);
+    await page.locator('button:has-text("保存全部")').click();
+    await expect(page.locator('#formsHint')).toContainText('已保存', { timeout: 15_000 });
+    st.expectClean();
+  });
+
+  // L3 P2 闸门：401 重输时**留空**必须视为「用户取消本动作」——
+  //   不能沿用上一次（可能就是错的）密码再打一次（必然再 401、白耗一次尝试、还多弹一次窗）。
+  // watch 的 password 数组按弹窗顺序作答：第 1 次弹窗答错密码 → 401；第 2 次（401 重输）留空。
+  test('401 重输留空：视为取消中止，只发 1 次请求、不再重试（L3 P2）', async ({ page }) => {
+    const st = watch(page, {
+      prompt: 'accept', password: ['WrongPw1!', ''],   // 1 次=错密码；2 次（401 重输）= 留空
+      countMethods: ['PUT /api/config/batch', 'GET /api/auth/challenge'],
+    });
+    await page.goto('/');
+    await openTab(page, 'forms');
+    const input = loopInput(page);
+    await expect(input).toBeVisible();
+    const original = await input.inputValue();
+    const fileBefore = fs.readFileSync(APP_DIR + '/appsettings.json', 'utf8');
+
+    // 改一个字段 → 触发一次「保存全部」（密码答错 → 服务端 401）
+    await input.fill(original === '7' ? '8' : '7');
+    await page.locator('button:has-text("保存全部")').click();
+
+    // 401 重输弹窗留空 → 视为取消：提示「已取消」、不发第 2 次请求、不再弹第 3 次窗
+    await expect(page.locator('#formsHint')).toContainText('已取消', { timeout: 15_000 });
+    await expect(page.locator('#formsHint')).toContainText('已取消，未保存');
+    await expect(page.locator('#formsHint')).not.toContainText('❌ 保存失败');
+    expect(st.prompts, '初始 1 次 + 401 重输 1 次 = 恰 2 次弹窗').toBe(2);
+    expect(st.reqCounts['PUT /api/config/batch'] || 0, '留空即中止：只应发出 1 次保存请求').toBe(1);
+    expect(st.reqCounts['GET /api/auth/challenge'] || 0, '留空即中止：不应再取第 2 次鉴权挑战').toBe(1);
+    // 配置不得有任何写入（请求在鉴权层就被 401 挡下）
+    expect(fs.readFileSync(APP_DIR + '/appsettings.json', 'utf8'), '留空中止后配置文件不得变化').toBe(fileBefore);
+    st.expectClean(['/api/config/batch', '401 (Unauthorized)']);   // 401 是本用例预期的响应
+  });
+});

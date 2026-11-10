@@ -146,7 +146,7 @@
     </section>
     <!-- API Docs -->
     <section id="tab-api" class="tab-content">
-      <div class="config-hint" style="margin-bottom:10px">所有接口均以 <b>/api</b> 为前缀（如 <b>http://服务器:5100/api/health</b>）。支持 GET 请求的接口可直接在浏览器打开。<br>标注 <b>Auth required</b> 的端点需先 <b>GET /api/auth/challenge</b> 取一次性 nonce（60 秒、一次一用），再带请求头 <b>X-Admin-Nonce</b> 与 <b>X-Admin-Hash = SHA-256(管理密码+nonce)</b>（小写 hex）。管理密码（WebAdmin:AdminPassword）在后台 appsettings.json 修改，页面不提供修改。</div>
+      <div class="config-hint" style="margin-bottom:10px">所有接口均以 <b>/api</b> 为前缀（如 <b>http://服务器:5100/api/health</b>）。支持 GET 请求的接口可直接在浏览器打开。<br>标注 <b>Auth required</b> 的端点需先 <b>GET /api/auth/challenge</b> 取一次性 nonce（60 秒、一次一用），再带请求头 <b>X-Admin-Nonce</b> 与 <b>X-Admin-Hash = SHA-256(管理密码+nonce)</b>（小写 hex）。鉴权成功的响应还会下发 <b>X-Admin-Token</b>（管理验证记忆，默认 <b>WebAdmin:AuthMemoryMinutes=5</b> 分钟）：其后的破坏性动作只带 <b>X-Admin-Token</b> 即可（令牌过期/改密码/进程重启后失效）。管理密码（WebAdmin:AdminPassword）在后台 appsettings.json 修改，页面不提供修改。</div>
       <table class="data-table" id="apiTable">
         <thead><tr><th style="width:90px">方法</th><th style="width:280px">端点</th><th>说明</th><th style="width:300px">示例 / 参数</th><th style="width:220px">响应示例</th></tr></thead>
         <tbody id="apiBody"></tbody>

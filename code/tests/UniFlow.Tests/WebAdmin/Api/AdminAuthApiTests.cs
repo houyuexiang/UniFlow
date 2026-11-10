@@ -378,6 +378,121 @@ public class AdminAuthApiTests
         (await resp.Content.ReadAsStringAsync()).ShouldContain("Admin password not configured");
     }
 
+    // ===== 管理验证记忆（短令牌 X-Admin-Token）=====
+
+    [Fact]
+    public async Task Auth_With_NonceHash_Returns_AdminToken_Header()
+    {
+        await using var host = await TestWebHost.StartAsync();
+
+        var msg = await host.AuthedAsync(HttpMethod.Get, "/api/config/download");
+        var resp = await host.Client.SendAsync(msg);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        resp.Headers.TryGetValues("X-Admin-Token", out var tokens).ShouldBeTrue();
+        var token = tokens!.Single();
+        token.Length.ShouldBe(64);                       // 32 字节 → 64 位十六进制
+        token.ShouldBe(token.ToLowerInvariant());
+        resp.Headers.TryGetValues("X-Admin-Token-Expires-In", out var exp).ShouldBeTrue();
+        exp!.Single().ShouldBe("300");                  // 默认 5 分钟
+    }
+
+    [Fact]
+    public async Task AdminToken_Only_Request_Succeeds_Without_NonceHash()
+    {
+        await using var host = await TestWebHost.StartAsync();
+
+        // 第一次：nonce/hash 鉴权 → 拿到令牌
+        var first = await host.Client.SendAsync(await host.AuthedAsync(HttpMethod.Get, "/api/config/download"));
+        first.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var token = first.Headers.GetValues("X-Admin-Token").Single();
+
+        // 第二次：只带 X-Admin-Token（不带 nonce/hash）→ 放行
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/api/config/download");
+        msg.Headers.Add("X-Admin-Token", token);
+        var second = await host.Client.SendAsync(msg);
+
+        second.StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await second.Content.ReadAsStringAsync()).ShouldContain("AdminPassword");
+    }
+
+    [Fact]
+    public async Task AdminToken_Only_Request_Works_For_Destructive_Endpoints()
+    {
+        await using var host = await TestWebHost.StartAsync();
+
+        var first = await host.Client.SendAsync(
+            await host.AuthedAsync(HttpMethod.Put, "/api/config/batch",
+                new { changes = new object[] { new { path = "Aptio:Port", value = 2055 } } }));
+        first.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var token = first.Headers.GetValues("X-Admin-Token").Single();
+
+        // 批量保存（破坏性端点）只带令牌 → 放行
+        var msg = new HttpRequestMessage(HttpMethod.Put, "/api/config/batch");
+        msg.Headers.Add("X-Admin-Token", token);
+        msg.Content = new StringContent(
+            "{\"changes\":[{\"path\":\"Aptio:Port\",\"value\":2055}]}",
+            System.Text.Encoding.UTF8, "application/json");
+        var resp = await host.Client.SendAsync(msg);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Invalid_AdminToken_Returns401()
+    {
+        await using var host = await TestWebHost.StartAsync();
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/api/config/download");
+        msg.Headers.Add("X-Admin-Token", new string('0', 64));
+        var resp = await host.Client.SendAsync(msg);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        (await resp.Content.ReadAsStringAsync()).ShouldContain("Admin authentication failed");
+    }
+
+    [Fact]
+    public async Task AuthMemoryMinutes_Zero_NoToken_Header_And_TokenOnly401()
+    {
+        await using var host = await TestWebHost.StartAsync(customize: node =>
+        {
+            node["WebAdmin"]!["AuthMemoryMinutes"] = 0;
+        });
+
+        // 密码校验通过，但不下发令牌（0 = 关闭验证记忆）
+        var resp = await host.Client.SendAsync(await host.AuthedAsync(HttpMethod.Get, "/api/config/download"));
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        resp.Headers.Contains("X-Admin-Token").ShouldBeFalse();
+
+        // 只带令牌（无令牌可用）→ 401
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/api/config/download");
+        msg.Headers.Add("X-Admin-Token", new string('a', 64));
+        var resp2 = await host.Client.SendAsync(msg);
+        resp2.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task AdminToken_Invalidated_After_AdminPasswordChanged()
+    {
+        await using var host = await TestWebHost.StartAsync();
+
+        var first = await host.Client.SendAsync(await host.AuthedAsync(HttpMethod.Get, "/api/config/download"));
+        first.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var token = first.Headers.GetValues("X-Admin-Token").Single();
+
+        // 后台改管理密码（appsettings.json）→ 旧令牌立即失效
+        var node = JsonNode.Parse(File.ReadAllText(host.ConfigPath))!.AsObject();
+        node["WebAdmin"]!["AdminPassword"] = JsonValue.Create("NewAdvia1");
+        File.WriteAllText(host.ConfigPath,
+            node.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+        var msg = new HttpRequestMessage(HttpMethod.Get, "/api/config/download");
+        msg.Headers.Add("X-Admin-Token", token);
+        var resp = await host.Client.SendAsync(msg);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
     // ===== 数据库连接测试（免鉴权，只测已保存配置）=====
 
     [Fact]

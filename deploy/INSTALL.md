@@ -1,4 +1,4 @@
-# UniFlow v1.0.7.1 部署安装手册
+# UniFlow v1.0.7.2 部署安装手册
 
 实验室自动化工作流服务 (.NET 10)，单文件自包含部署，即插即用。
 
@@ -6,7 +6,7 @@
 
 ## 一、安装包内容
 
-### Linux 包 (`UniFlow-1.0.7.1-linux-x64.tar.gz`)
+### Linux 包 (`UniFlow-1.0.7.2-linux-x64.tar.gz`)
 
 | 文件 | 说明 |
 |------|------|
@@ -19,7 +19,7 @@
 | `使用说明书.md` | UniFlow 使用说明书（一册通：安装/配置/WebAdmin/丢弃流程/故障排查） |
 | `README.md` | 使用说明 |
 
-### Windows 包 (`UniFlow-1.0.7.1-win-x64.zip`)
+### Windows 包 (`UniFlow-1.0.7.2-win-x64.zip`)
 
 | 文件 | 说明 |
 |------|------|
@@ -45,7 +45,7 @@
 
 ```bash
 # 1. 解压
-tar -xzf UniFlow-1.0.7.1-linux-x64.tar.gz
+tar -xzf UniFlow-1.0.7.2-linux-x64.tar.gz
 cd uniflow
 
 # 2. 修改配置（编辑 appsettings.json，见第四节）

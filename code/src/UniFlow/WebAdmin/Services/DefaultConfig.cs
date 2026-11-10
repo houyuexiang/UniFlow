@@ -33,7 +33,7 @@ public static class DefaultConfig
             "BatchScan": { "LoopIntervalSeconds": 60, "MaxOnetimeScanCount": 500 }
           },
           "WorkListCleaners": [],
-          "WebAdmin": { "Enabled": true, "BindIp": "0.0.0.0", "Port": 5100, "ErrorRetentionDays": 30, "HealthCheckIntervalSeconds": 60, "AdminPassword": "Advia1" },
+          "WebAdmin": { "Enabled": true, "BindIp": "0.0.0.0", "Port": 5100, "ErrorRetentionDays": 30, "HealthCheckIntervalSeconds": 60, "AdminPassword": "Advia1", "AuthMemoryMinutes": 5 },
           "DMS": {
             "Enabled": false, "DbHost": "127.0.0.1", "DbPort": 3306, "DbUser": "root", "DbPassword": "", "DbName": "dms",
             "LoopIntervalSeconds": 60, "PitStop": { "TimeoutMinutes": 1 },

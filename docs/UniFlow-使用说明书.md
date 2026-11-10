@@ -111,7 +111,7 @@ uniflow/
 ### 2.3 Linux 安装
 
 ```bash
-tar -xzf UniFlow-1.0.7.1-linux-x64.tar.gz
+tar -xzf UniFlow-1.0.7.2-linux-x64.tar.gz
 cd uniflow
 
 # 编辑配置（数据库、Aptio、管理密码）
@@ -190,6 +190,7 @@ WebAdmin__BindIp / WebAdmin__Port
 | 配置 | 说明 |
 |---|---|
 | `WebAdmin:AdminPassword` | 默认 `Advia1`；**页面不能改**，只能后台改 `appsettings.json`；Hot 生效 |
+| `WebAdmin:AuthMemoryMinutes` | 默认 `5`（管理验证记忆，分钟）：一次密码后 5 分钟内不再重复弹密码；`0` = 每次都弹；Hot 生效（见 §4.1） |
 | `WebAdmin:BindIp` | 现场常用 `0.0.0.0`（局域网访问）；默认模板为 `localhost` 时只能本机访问 |
 | `WebAdmin:Port` | 默认 `5100` |
 | `Aptio:Ip` / `Aptio:Port` | Aptio 服务器地址 / 2055 |
@@ -330,11 +331,22 @@ DMS/                DMS 基础设施与自动工单
 ### 4.1 访问与鉴权
 
 - 地址：`http://<服务器IP>:5100`
-- 破坏性动作（保存配置、下载配置、重启、升级、清错误、删队列）每次弹一次管理密码；
-- 鉴权方式：一次性 nonce（60 秒、一次一用）+ `SHA-256(密码 + nonce)`，**没有会话 token**；
-- 连续做多个动作 = 每个动作各弹一次；一次「保存全部」只算一次；
-- 401 = 密码错误/挑战过期；403 = 后台未配置 `AdminPassword`；
+- 破坏性动作（保存配置、下载配置、重启、升级、清错误、删队列）需要管理密码：**有有效「验证记忆」短令牌时不弹密码**，否则每次弹一次；
+- 鉴权方式：一次性 nonce（60 秒、一次一用）+ `SHA-256(密码 + nonce)`；**不建长会话**，只在默认 5 分钟内用一次**短令牌**（见下方「管理验证记忆」）；
+- 连续做多个动作 = 令牌有效期间**不再弹密码**；令牌失效（过期 / 刷新页面 / 改密码 / 重启服务）后，每个动作各弹一次；一次「保存全部」只算一次；
+- 401 = 密码错误/验证已过期；403 = 后台未配置 `AdminPassword`；
+- 401 后会弹一次「重新输入」：**留空或取消都视为中止本次动作**（不会拿上一次的密码再试一次），页面提示「已取消」；
 - 管理密码只能改后台 `appsettings.json` 的 `WebAdmin:AdminPassword`，页面不显示、不可改。
+
+**管理验证记忆（默认开启，5 分钟）**
+
+- 密码验证成功后，服务端发一个**短令牌**（响应头 `X-Admin-Token`），**5 分钟内**的后续破坏性动作**不再弹密码**（页面自动带上该令牌）；
+- 令牌**只存浏览器内存**（不落 localStorage/sessionStorage）→ **刷新页面即失效**，刷新后的第一个动作会重新弹密码；
+- 服务端令牌只存内存、**不保存明文密码**（只存管理密码的 SHA-256 指纹）→ **改管理密码**或**重启服务**后旧令牌立即失效（页面会重新弹密码）；
+- 时长**固定 5 分钟、不滑动续期**（不是「每次操作续 5 分钟」）；
+- 想恢复「每个动作都弹一次密码」：把后台 `appsettings.json` 的 `WebAdmin:AuthMemoryMinutes` 设为 `0`（热生效，无需重启）；
+- 令牌是 **bearer 凭证**（拿到就能用）：HTTP 明文下抓包者可在其有效期内重放 → 建议用 HTTPS 反代后再开放管理界面；
+- 「下载配置原文」返回**全部明文密码**，始终重新输入密码（不借用令牌）。
 
 ### 4.2 仪表盘
 
@@ -604,7 +616,7 @@ logs/
 
 | 现象 | 可能原因 | 处理 |
 |---|---|---|
-| 页面 401 | 密码错/挑战过期 | 重新输入；确认 `AdminPassword` |
+| 页面 401 | 密码错/挑战过期/验证记忆已过期 | 重新输入；确认 `AdminPassword`；页面刷新后需重新输入（令牌只在内存） |
 | 页面 403 | 后台 `AdminPassword` 为空 | 在 `appsettings.json` 设置密码 |
 | `Aptio not connected` | IP/端口/防火墙/Aptio 未开 | 查 2055、网络、Aptio 状态 |
 | `Database unavailable` | MySQL 连不上/账号错 | 查连接串、账号、网络 |
@@ -646,6 +658,7 @@ SELECT sample_id,t_location FROM t_sample WHERE t_location LIKE '&3-13-%' LIMIT 
 - 默认假设**局域网可信**；`WebAdmin:BindIp=0.0.0.0` 时同网段可访问；
 - **首次部署必须改** `WebAdmin:AdminPassword`（默认 `Advia1`）；
 - 破坏性动作每次密码；nonce 60 秒一次性；HTTP 明文下仍有 60 秒重放窗口；
+- 「管理验证记忆」开启后（默认 5 分钟）改用短令牌 `X-Admin-Token`：bearer 凭证、不落盘、刷新/改密码/重启即失效，但 **HTTP 明文下重放窗口变成最长 5 分钟** → 建议上 HTTPS，或把 `WebAdmin:AuthMemoryMinutes` 设为 `0`；
 - 网络不可信时：用反向代理加 HTTPS + IP 白名单，或只绑内网；
 - 升级包目前**没有签名校验**，只应使用可信来源的包；
 - 单实例保护：`Global\UniFlow`（Windows 权限不足回退 `Local`）；
@@ -743,6 +756,7 @@ SELECT sample_id,t_location FROM t_sample WHERE t_location LIKE '&3-13-%' LIMIT 
 | 1.0.6.7 | 维护版：死代码、配置单源、日志锁、安装脚本、XSS 闸门 |
 | 1.0.7.0 | 快速填窗（默认关）+ 批量确认 + 重排队死锁修复 |
 | 1.0.7.1 | 按架排序（默认开）+ `~other` 兜底 + 回退测试 |
+| 1.0.7.2 | 管理验证 5 分钟记忆（服务端短令牌） |
 
 ---
 

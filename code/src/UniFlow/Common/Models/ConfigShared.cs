@@ -217,4 +217,8 @@ public class WebAdminConfig
     // - 只能后台改 appsettings.json 的 WebAdmin:AdminPassword；
     // - 置空（""）→ 所有破坏性端点拒绝（403 未配置管理密码）。
     [Restart(RestartLevel.Hot)] public string AdminPassword { get; set; } = "Advia1";
+
+    // 管理验证记忆（分钟）：密码验证成功后发短令牌，默认 5 分钟内后续破坏性动作不再弹密码；
+    // 0=关闭（每次动作都弹密码）。令牌只存服务端内存 + 浏览器内存；刷新页面/改密码/重启后失效。
+    [Restart(RestartLevel.Hot)] public int AuthMemoryMinutes { get; set; } = 5;
 }

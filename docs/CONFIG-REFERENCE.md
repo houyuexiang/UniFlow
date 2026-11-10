@@ -412,6 +412,7 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 | `ErrorRetentionDays` | int | `30` | 错误记录保留天数 |
 | `HealthCheckIntervalSeconds` | int | `60` | 健康检查间隔(秒) |
 | `AdminPassword` | string | `Advia1` | **管理密码**：Web 管理界面破坏性动作的鉴权口令。**热生效**（每次动作从 appsettings.json 读取，改完立即生效，无需重启）。页面**不显示、不可改**；只能后台改本文件。置空（`""`）→ 所有破坏性端点一律拒绝（403 未配置管理密码） |
+| `AuthMemoryMinutes` | int | `5` | **管理验证记忆（分钟）**：密码验证成功后服务端发一个**短令牌**（`X-Admin-Token`），默认 5 分钟内后续破坏性动作不再重复弹密码。**热生效**；取值 0~60（0 = 关闭，每次动作都弹密码）。详见下方「管理验证记忆」小节 |
 
 ### 管理密码（`WebAdmin:AdminPassword`）
 
@@ -432,13 +433,37 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 4. 后端用同一 nonce 重算 `SHA256.HashData(UTF8(密码 + nonce))`（十六进制小写）并**常量时间**比较；
 5. nonce **无论成败都消费掉**（重放必然 401）；密码与哈希**不写日志**。
 
+### 管理验证记忆（`WebAdmin:AuthMemoryMinutes`）
+
+| 事项 | 口径 |
+|------|------|
+| 默认值 | `5`（分钟）；取值范围 0~60，超范围按 0/60 截断；配置缺失/非法 → 回落 5 |
+| 生效方式 | **热生效**（每次破坏性动作重新读配置，改完立即生效，无需重启） |
+| `0` = 关闭 | 不发短令牌 → **每次破坏性动作都重新弹密码**（回到「每次动作一次鉴权」的原始口径）。已签发的旧令牌最长在其自身有效期内（≤5 分钟）仍可用 |
+| 令牌 | 服务端生成 **32 字节随机 → 64 位十六进制小写**；响应头 `X-Admin-Token` |
+| 有效期 | **固定** `AuthMemoryMinutes` 分钟（从密码验证成功起算），**不滑动续期**（用一次不重置计时） |
+| 服务端存储 | **只存进程内存**（令牌 + 过期时刻 + 当前管理密码的 SHA-256 指纹）；**不保存明文密码**；进程重启 → 全部失效 |
+| 浏览器存储 | **只存内存**（页面 JS 变量），**不落 localStorage/sessionStorage** → **刷新页面即失效**，下一个动作重新弹密码 |
+| 失效条件 | 令牌过期 / 管理密码被改（指纹不匹配 → 令牌立即作废）/ 服务端进程重启 / 页面刷新 |
+| 覆盖范围 | **所有挂 `AdminAuthFilter` 的端点**（保存配置、批量保存、重启、进程重启、上传/应用升级、清错误、下载配置原文、丢弃队列重排队/删除） |
+| 用法 | 后续请求带 `X-Admin-Token: <token>` 即可（可重复使用，直到过期）；仍可继续用 `X-Admin-Nonce` + `X-Admin-Hash` |
+| 失效后的行为 | 服务端返回 **401 `Admin authentication failed`**；页面清掉内存令牌并重新弹密码 |
+
+**安全边界（务必知悉）**
+
+- 短令牌是 **bearer 凭证**：**谁拿到谁就能用**，不需要再输密码。令牌只在其有效期内有效（默认 5 分钟），过期/改密码/重启即作废。
+- 当前 Web 管理走 **HTTP 明文**：抓包者拿到 `X-Admin-Token` 后，可在**其剩余有效期内（最长 5 分钟）重放**破坏性动作 —— 这比原来「60 秒一次性 nonce」的重放窗口**更长**。**强烈建议上 HTTPS（反向代理终止 TLS）后再开放管理界面**。
+- 令牌**不落盘**（服务端内存 + 浏览器内存）：既不会随配置文件/备份泄漏，也无法在换浏览器/换人时复用；但也意味着**页面一刷新就要重新输密码**（这是刻意的收敛）。
+- 建议在**不熟悉的现场**把 `WebAdmin:AuthMemoryMinutes` 设为 `0`（每次都弹密码），或缩短到 1~2 分钟。
+
 **HTTP 明文环境下的局限（务必知悉）**
 
 - 当前 Web 管理走 **HTTP 明文**（`http://<host>:5100`），哈希只解决「不直接传明文口令」，**不防中间人（MITM）**：抓包者拿到 `X-Admin-Hash` 即可在 60 秒窗口内重放该动作（nonce 一次性只能防「同一次动作重复提交」，不能防「抓到包后立刻用」）。
+- 开启「管理验证记忆」后，抓包者拿到 `X-Admin-Token` 的**重放窗口更长**（最长 5 分钟）→ 更加需要 HTTPS。
 - 局域网可信是当前前提；要进一步收紧，请：① 上 HTTPS（反向代理终止 TLS）后再开放；② 或限制 `BindIp` 只监听管理网段；③ 或在防火墙上只放行运维终端。
 - 传输层明文时，**管理密码不要与其他系统共用**。
 
-**需要管理鉴权的端点**（缺头/错哈希 → **401 `Admin authentication failed`**）：
+**需要管理鉴权的端点**（缺头/错哈希/令牌无效 → **401 `Admin authentication failed`**）：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -452,6 +477,8 @@ SELECT COUNT(*) FROM t_sample WHERE t_status='C' AND t_location LIKE '&1-{node}-
 | DELETE | `/api/errors` | 清空错误记录 |
 | POST | `/api/dispose/pending/reset` | 重排队 |
 | POST | `/api/dispose/pending/delete` | 删除待处置记录 |
+
+> 以上端点**同时接受** `X-Admin-Nonce` + `X-Admin-Hash`（一次性 nonce 口径）与 `X-Admin-Token`（管理验证记忆短令牌口径）。带有效令牌 → 直接放行；令牌无效但同时带了 nonce/hash → 仍走 nonce/hash 校验（旧令牌不会挡住「用新密码重新鉴权」）。
 
 **免鉴权的端点**：`GET /api/health`、`GET /api/health/history`、`GET /api/errors`、`GET /api/errors/summary`、`GET /api/logs/*`、`GET /api/config`（打码）、`GET /api/dispose/pending`、`POST /api/dispose/pending/recheck`、`POST /api/config/test-db`、`GET /api/auth/challenge`、`GET /api/version`、`GET /api/restart/status`、`GET /api/update/status`。
 

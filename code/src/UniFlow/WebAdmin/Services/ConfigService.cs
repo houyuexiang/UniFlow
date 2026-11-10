@@ -365,6 +365,40 @@ public class ConfigService
         }
     }
 
+    /// <summary>管理验证记忆的默认分钟数（配置缺失/非法时的兜底）。</summary>
+    public const int DefaultAuthMemoryMinutes = 5;
+
+    /// <summary>管理验证记忆的分钟数上限（配置超出按此值截断）。</summary>
+    public const int MaxAuthMemoryMinutes = 60;
+
+    /// <summary>
+    /// 读取「管理验证记忆」分钟数（WebAdmin:AuthMemoryMinutes）。
+    /// 缺失 / 非法 → 默认 5；取值夹到 0~60（0 = 关闭验证记忆，每次破坏性动作都重新弹密码）。
+    /// <para>
+    /// 容错口径与 <see cref="ReadAdminPassword"/> 一致：**读不到不抛**，一律回落默认值
+    /// （配置损坏时不应把整个管理界面打成 500）。
+    /// </para>
+    /// </summary>
+    public int ReadAuthMemoryMinutes()
+    {
+        try
+        {
+            var v = ReadPath("WebAdmin:AuthMemoryMinutes");
+            if (v == null) return DefaultAuthMemoryMinutes;
+            int minutes;
+            if (v.Value.ValueKind == JsonValueKind.Number && v.Value.TryGetInt32(out minutes))
+                return Math.Clamp(minutes, 0, MaxAuthMemoryMinutes);
+            if (v.Value.ValueKind == JsonValueKind.String && int.TryParse(v.Value.GetString(), out minutes))
+                return Math.Clamp(minutes, 0, MaxAuthMemoryMinutes);
+            return DefaultAuthMemoryMinutes;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("ReadAuthMemoryMinutes failed: {Msg}", ex.Message);
+            return DefaultAuthMemoryMinutes;
+        }
+    }
+
     // 读取单项配置（按 ':' 逐级导航；未命中返回 null）
     public System.Text.Json.JsonElement? ReadPath(string jsonPath)
     {

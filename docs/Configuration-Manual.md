@@ -340,9 +340,16 @@ HH:MM-HH:MM,threshold;HH:MM-HH:MM,threshold;...
 | `WebAdmin:ErrorRetentionDays` | integer | `30` | 错误记录保留天数 |
 | `WebAdmin:HealthCheckIntervalSeconds` | integer | `60` | 健康检查间隔（秒） |
 | `WebAdmin:AdminPassword` | string | `"Advia1"` | **管理密码**（破坏性动作鉴权）。**热生效**，改完立即生效、无需重启；**页面不显示、不可改**，只能后台改 `appsettings.json`；置空 → 破坏性端点一律 403 拒绝 |
+| `WebAdmin:AuthMemoryMinutes` | integer | `5` | **管理验证记忆（分钟）**。密码验证成功后服务端发一个短令牌（`X-Admin-Token`），默认 5 分钟内后续破坏性动作不再重复弹密码。**热生效**；范围 0~60；`0` = 关闭（每次动作都弹密码）。令牌只存服务端内存 + 浏览器内存（不落 localStorage/sessionStorage），**刷新页面 / 改密码 / 进程重启后失效** |
 
 > 管理密码的完整口径（鉴权流程、需鉴权端点清单、HTTP 明文下的局限）见《配置参考》`WebAdmin` 章「管理密码」小节。
 > 一句话：**每次破坏性动作鉴权一次**（取一次性 nonce → 算 `SHA-256(密码+nonce)` → 带 `X-Admin-Nonce`/`X-Admin-Hash`），不建 30 分钟会话 token。
+>
+> **管理验证记忆**（`AuthMemoryMinutes`，默认 5）：密码验证成功后，服务端额外下发一个短令牌（响应头 `X-Admin-Token` + `X-Admin-Token-Expires-In`），之后 5 分钟内的破坏性动作只带 `X-Admin-Token` 即可（页面不再弹密码）。
+> - 令牌**固定 5 分钟**、不滑动续期；**只存服务端内存**（不含明文密码，只存管理密码的 SHA-256 指纹）与**浏览器内存**（不落 localStorage/sessionStorage）。
+> - **刷新页面即失效**（下一个动作重新弹密码）；管理密码被改、服务端进程重启同样失效。
+> - 令牌是 **bearer 凭证**：HTTP 明文下抓包者可在其有效期内（最长 5 分钟）重放 → **建议上 HTTPS**。
+> - 需要「每次都弹密码」的现场，把本项设为 `0`。
 
 ---
 

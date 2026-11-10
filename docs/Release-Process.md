@@ -36,7 +36,7 @@ git push origin v${VERSION}
 APP_SETTINGS=/path/to/site-appsettings.json ./deploy/package.sh
 
 # 版本号默认取 UniFlow.csproj 的 <Version>，可覆盖
-VERSION=1.0.7.1 OUT=release ./deploy/package.sh
+VERSION=1.0.7.2 OUT=release ./deploy/package.sh
 ```
 
 产物（输出目录默认 `release/`）：
@@ -66,7 +66,7 @@ dotnet publish UniFlow/UniFlow.csproj \
 历史教训：**1.0.5.5 ~ 1.0.6.5 的 Linux 包漏了 `README.md` / `INSTALL.md`**（`package.sh` Linux 段漏 `cp`，直到 1.0.6.5 才修复）。每次打包后必须跑：
 
 ```bash
-VERSION="1.0.7.1"
+VERSION="1.0.7.2"
 # 两包文档清单齐备（各 4 份：README.md / INSTALL.md / CONFIG-REFERENCE.md / 使用说明书.md）
 tar -tzf release/UniFlow-${VERSION}-linux-x64.tar.gz | grep -E '\.md$'
 unzip -l release/UniFlow-${VERSION}-win-x64.zip | grep -E '\.md$'
@@ -85,7 +85,7 @@ cmp '/tmp/pkgchk/linux/uniflow/使用说明书.md' '/tmp/pkgchk/win/uniflow/使�
 ### 3. 发布到 GitHub
 
 ```bash
-VERSION="1.0.7.1"
+VERSION="1.0.7.2"
 
 # 打 Tag
 git tag -a v${VERSION} -m "v${VERSION} - 版本说明"

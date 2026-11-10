@@ -18,7 +18,18 @@ async function api(path, opts) {
 // 动作开始时弹一次密码，只存在该动作的局部 pwHolder 中——不落 localStorage/sessionStorage，
 // 动作结束（成功/失败）即随作用域丢弃。任何日志/alert 不打印密码或 hash。
 // 后端拒绝 WebAdmin:AdminPassword 的 API 写入：密码只能在后台 appsettings.json 修改。
+//
+// 「管理验证记忆」（WebAdmin:AuthMemoryMinutes，默认 5 分钟，0=关闭）：
+//   密码校验成功后服务端下发**短令牌**（响应头 X-Admin-Token + X-Admin-Token-Expires-In），
+//   之后的破坏性动作只带 X-Admin-Token 即可（不再重复弹密码）。
+//   令牌只存在**浏览器内存**（_adminToken）——不落 localStorage/sessionStorage，
+//   刷新页面即失效（下次动作重新弹密码）；服务端令牌也只存内存（进程重启/改密码即失效）。
+//   令牌是 bearer 凭证：拿到就能用，HTTP 明文下抓包者可在有效期内重放 → 建议上 HTTPS。
 // ============================================================
+
+// 管理验证记忆：短令牌与其到期时刻（毫秒时间戳）。仅存内存，刷新页面即丢。
+let _adminToken = null;
+let _adminTokenExpiresAt = 0;
 
 // 纯 JS SHA-256（FIPS 180-4）：站点走 HTTP，浏览器 crypto.subtle 仅在安全上下文
 // （HTTPS/localhost）可用，非 HTTPS 下为 undefined，故必须内置、不引外部依赖。
@@ -83,44 +94,102 @@ function sha256Hex(str) {
   });
 })();
 
+// 当前可用的管理短令牌（已过期则顺手清掉）。只存内存 → 刷新页面即失效。
+function currentAdminToken() {
+  if (_adminToken && Date.now() < _adminTokenExpiresAt) return _adminToken;
+  if (_adminToken) clearAdminToken(null);
+  return null;
+}
+
+// 丢弃管理短令牌（令牌失效/过期/密码变更后调用）。
+function clearAdminToken(pwHolder) {
+  _adminToken = null;
+  _adminTokenExpiresAt = 0;
+  if (pwHolder) pwHolder.token = null;
+}
+
+// 采纳服务端下发的管理短令牌（响应头 X-Admin-Token / X-Admin-Token-Expires-In）。
+// 只存内存，不落 localStorage/sessionStorage。
+function rememberAdminToken(token, expiresIn, pwHolder) {
+  const exp = parseInt(expiresIn || '0', 10);
+  if (!token || !(exp > 0)) return null;
+  _adminToken = token;
+  _adminTokenExpiresAt = Date.now() + exp * 1000;
+  if (pwHolder) pwHolder.token = token;
+  return token;
+}
+
 // 动作开始时调用：弹一次密码输入。返回 { pw } 容器（后续各请求共享），
 // 用户取消 / 空输入 → 返回 null，调用方必须中止动作、不发请求。
-function adminAuth(action) {
+// 有有效的管理短令牌时**不弹密码**，直接返回 { token }（不再取 nonce、不再算 hash）。
+// forcePrompt=true（下载配置原文等「读取全部明文密码」的高敏动作）→ 始终重新输入密码。
+function adminAuth(action, opts) {
+  if (!(opts && opts.forcePrompt)) {
+    const tok = currentAdminToken();
+    if (tok) return { token: tok };
+  }
   const pw = prompt('管理密码（' + (action || '管理操作') + '）\n\n密码仅用于本动作、不会保存；管理密码请在后台 appsettings.json 的 WebAdmin:AdminPassword 修改，页面不提供修改。');
   if (pw === null) return null;            // 取消 → 中止动作
   if (pw === '') { alert('管理密码不能为空，已取消'); return null; }
   return { pw };
 }
 
-// 一次鉴权 HTTP 请求：发送前取一次性新 nonce，现算 X-Admin-Hash。
-// pwHolder：adminAuth() 返回的容器（同一动作内复用密码，不落任何存储）。
-// optsFactory(headers)：返回 fetch options；多请求动作（upload+apply）逐请求调用本函数 = 各取一个新 nonce。
-// 401 → 提示「管理密码错误或挑战过期」并重新弹密码（最多重试 2 次）；403 → 不重试。
+// 生成管理鉴权头：
+// - 有有效短令牌 → 只带 X-Admin-Token（不再取 nonce、不再算 hash）；
+// - 否则 → 取一次性新 nonce，现算 X-Admin-Hash。
+// 返回 { headers, usedToken }；取不到挑战 → { error: 'challenge' }。
+async function buildAuthHeaders(pwHolder) {
+  const tok = (pwHolder && pwHolder.token) || currentAdminToken();
+  if (tok) return { headers: { 'X-Admin-Token': tok }, usedToken: true };
+  if (!pwHolder || !pwHolder.pw) return { error: 'nopw' };
+  let ch;
+  try {
+    const cr = await fetch(BASE + '/auth/challenge');
+    ch = await cr.json();
+  } catch (e) { return { error: 'challenge' }; }
+  return {
+    headers: { 'X-Admin-Nonce': ch.nonce, 'X-Admin-Hash': sha256Hex(pwHolder.pw + ch.nonce) },
+    usedToken: false,
+  };
+}
+
+// 一次鉴权 HTTP 请求：有有效短令牌则直接带上，否则发送前取一次性新 nonce、现算 X-Admin-Hash。
+// pwHolder：adminAuth() 返回的容器（同一动作内复用密码/令牌，不落任何存储）。
+// optsFactory(headers)：返回 fetch options；多请求动作（upload+apply）逐请求调用本函数。
+// 成功 → 采纳服务端下发的短令牌（后续破坏性动作不再弹密码）。
+// 401 → 丢弃失效令牌 + 提示「管理密码错误或验证已过期」并重新弹密码（最多重试 2 次）；
+//       重输时**取消(null)或留空('')都视为用户取消本动作**（不再沿用旧密码重试）；403 → 不重试。
+// 网络错误 → 保留令牌（服务端可能只是暂时不可达）。
 // 返回 { ok, status, data, networkError, canceled }；网络中断时 data=null。
 async function authFetch(pwHolder, path, optsFactory) {
   for (let attempt = 0; attempt < 3; attempt++) {
-    let ch;
-    try {
-      const cr = await fetch(BASE + '/auth/challenge');
-      ch = await cr.json();
-    } catch (e) { return { ok: false, status: 0, data: null, networkError: true, canceled: false }; }
-    const headers = Object.assign(
-      { 'X-Admin-Nonce': ch.nonce, 'X-Admin-Hash': sha256Hex(pwHolder.pw + ch.nonce) },
-      (optsFactory && optsFactory.headers) || {});
+    const auth = await buildAuthHeaders(pwHolder);
+    if (auth.error) return { ok: false, status: 0, data: null, networkError: true, canceled: false };
+    const headers = Object.assign({}, auth.headers, (optsFactory && optsFactory.headers) || {});
     const opts = Object.assign({}, optsFactory, { headers });
     let r;
     try { r = await fetch(BASE + path, opts); }
     catch (e) { return { ok: false, status: 0, data: null, networkError: true, canceled: false }; }
     let data = null; try { data = await r.json(); } catch (e) {}
     if (r.status === 401) {
+      // 令牌过期/无效/密码已改 → 丢弃令牌，回落到「密码 + 一次性 nonce」流程
+      if (auth.usedToken) clearAdminToken(pwHolder);
       if (attempt < 2) {
-        const again = prompt('管理密码错误或挑战过期，请重新输入（取消 = 中止本动作）');
-        if (again === null) return { ok: false, status: 401, data, canceled: true, networkError: false };
-        pwHolder.pw = again === '' ? pwHolder.pw : again;
+        const again = prompt('管理密码错误或验证已过期，请重新输入（留空/取消 = 中止本动作）');
+        // 取消(null)与留空('')都视为**用户取消本动作**：
+        //   留空时不再沿用上一次（可能就是错的）密码重试 —— 否则必然再 401 一次、白耗一次尝试；
+        //   直接返回 canceled，调用方按「已取消」收尾，不发请求、不再弹窗。
+        if (again === null || again === '') {
+          return { ok: false, status: 401, data, canceled: true, networkError: false };
+        }
+        pwHolder.pw = again;
+        pwHolder.token = null;
         continue;
       }
       return { ok: false, status: 401, data, canceled: false, networkError: false };
     }
+    // 采纳服务端下发的短令牌（鉴权已通过；业务层 400 也会带这个头 → 密码没错就不该再弹一次）
+    rememberAdminToken(r.headers.get('X-Admin-Token'), r.headers.get('X-Admin-Token-Expires-In'), pwHolder);
     return { ok: r.ok, status: r.status, data, canceled: false, networkError: false };
   }
   return { ok: false, status: 401, data: null, canceled: false, networkError: false };
@@ -129,7 +198,7 @@ async function authFetch(pwHolder, path, optsFactory) {
 // 把 authFetch 结果翻译为用户可读错误；无法区分时返回 null（调用方兜底）。
 function authErrMsg(res) {
   if (!res) return null;
-  if (res.status === 401) return '管理密码错误或挑战过期';
+  if (res.status === 401) return '管理密码错误或验证已过期';
   if (res.status === 403) return '未配置管理密码（后台 appsettings.json 的 WebAdmin:AdminPassword），页面无法修改';
   return null;
 }
@@ -569,7 +638,7 @@ function escapeHtml(s) {
 // ===== API 说明页 =====
 const API_DOCS = [
   { m:'GET',  ep:'/api/auth/challenge',             desc:'Get a one-time admin auth nonce (60s TTL, single-use). Free endpoint (no auth)', ex:'Open directly in browser',
-    resp:'{"nonce":"<64 hex>","expiresInSeconds":60}   Admin endpoints need headers X-Admin-Nonce: <nonce> and X-Admin-Hash: sha256(password+nonce) lowercase hex (fresh nonce per request)' },
+    resp:'{"nonce":"<64 hex>","expiresInSeconds":60}   Admin endpoints need headers X-Admin-Nonce: <nonce> and X-Admin-Hash: sha256(password+nonce) lowercase hex (fresh nonce per request). A successful auth also returns response headers X-Admin-Token + X-Admin-Token-Expires-In (auth memory, default 5 min): resend X-Admin-Token instead of nonce/hash for the next destructive call' },
   { m:'GET',  ep:'/api/version',                    desc:'Program version',                              ex:'Open directly in browser',
     resp:'{"version":"1.0.6.0","informational":"1.0.6.0+e852259"}' },
   { m:'GET',  ep:'/api/health',                     desc:'Per-module health + overall aggregation',      ex:'Open directly in browser',
@@ -580,30 +649,30 @@ const API_DOCS = [
     resp:'{"ConfigVersion":"1.0","Features":{...},"Aptio":{...},"DMS":{...}}' },
   { m:'GET',  ep:'/api/config?path=Aptio:Port',     desc:'Read a single config item by path',            ex:'?path=<colon-separated path>, e.g. ?path=Aptio:Port',
     resp:'{"path":"Aptio:Port","value":2055}   (404 if not found; masked if Password key)' },
-  { m:'PUT',  ep:'/api/config',                     desc:'Update one config item. Auth required: X-Admin-Nonce + X-Admin-Hash (see /api/auth/challenge). Validation: unknown path / wrong type / out-of-range rejected with 400 + reason. WebAdmin:AdminPassword cannot be changed via API. Effective level returned.',
+  { m:'PUT',  ep:'/api/config',                     desc:'Update one config item. Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes) (see /api/auth/challenge). Validation: unknown path / wrong type / out-of-range rejected with 400 + reason. WebAdmin:AdminPassword cannot be changed via API. Effective level returned.',
     ex:'string: {"path":"Aptio:Ip","value":"10.0.0.200"} | int: {"path":"Aptio:Port","value":2055} | bool: {"path":"Features:Aptio:Priority","value":true} | string[]: {"path":"Aptio:DisposeSample:AllowedSrmErrorCodes","value":["0000","0F0A"]} | int[]: {"path":"Aptio:DisposeSample:RunDays","value":[1,3,5]} | object[]: {"path":"DMS:SampleCleanup:TriggerRules","value":[{"TestName":"RMSMP","TimeoutMinutes":1}]} | timeRanges: {"path":"Aptio:DisposeSample:TimeRanges","value":[{"Start":"01:30","End":"05:45","Threshold":3800},{"Start":"18:00","End":"07:00","Threshold":7500}]}',
     resp:'{"success":true,"restart":{"level":"Hot|InnerRestart|ProcessRestart","message":"Saved. Effective immediately (hot reload)."}}  Hot=hot reload / InnerRestart=POST /api/restart / ProcessRestart=restart the OS service process. Rejected: 400 {"success":false,"error":"..."}' },
-  { m:'PUT',  ep:'/api/config/batch',               desc:'Update many config items in ONE request (one auth challenge, all-or-nothing: any invalid item → 400 and nothing written). Auth required: X-Admin-Nonce + X-Admin-Hash. Password fields: value "***" or "" keeps the stored value. WebAdmin:AdminPassword cannot be changed via API', ex:'{"changes":[{"path":"Aptio:Ip","value":"10.0.0.200"},{"path":"Aptio:Port","value":2055}]}   (max 100 changes)',
+  { m:'PUT',  ep:'/api/config/batch',               desc:'Update many config items in ONE request (one auth challenge, all-or-nothing: any invalid item → 400 and nothing written). Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes). Password fields: value "***" or "" keeps the stored value. WebAdmin:AdminPassword cannot be changed via API', ex:'{"changes":[{"path":"Aptio:Ip","value":"10.0.0.200"},{"path":"Aptio:Port","value":2055}]}   (max 100 changes)',
     resp:'{"success":true,"count":2,"skipped":0,"restart":{"level":"Hot|InnerRestart|ProcessRestart","message":"..."}}   Failed: 400 {"success":false,"error":"Aptio:Port: <reason>"}' },
   { m:'POST', ep:'/api/config/test-db?target=aptio', desc:'Test MySQL connectivity of the SAVED config only (free endpoint, no auth, no request body; never tests unsaved form values, never returns passwords)', ex:'?target=aptio (Aptio/FlexLab DB) | ?target=dms (DMS DB)',
     resp:'{"success":true,"target":"aptio","elapsedMs":123,"message":"..."}   Failed: success:false with message; 400 if target invalid or saved config incomplete' },
-  { m:'POST', ep:'/api/restart',                     desc:'Restart business workers only (rebuild with latest config; web keeps running). Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'Returns 202 while starting; 409 if restart already in progress',
+  { m:'POST', ep:'/api/restart',                     desc:'Restart business workers only (rebuild with latest config; web keeps running). Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'Returns 202 while starting; 409 if restart already in progress',
     resp:'{"restarting":true,"level":"inner","hint":"..."}' },
-  { m:'POST', ep:'/api/restart/process',             desc:'Full process restart (exit code 1, auto-relaunched by systemd/Service Recovery). Used after upgrades or for process-level config to take effect. Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'curl -X POST /api/restart/process',
+  { m:'POST', ep:'/api/restart/process',             desc:'Full process restart (exit code 1, auto-relaunched by systemd/Service Recovery). Used after upgrades or for process-level config to take effect. Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'curl -X POST /api/restart/process',
     resp:'{"restarting":true,"level":"process","hint":"..."}' },
   { m:'GET',  ep:'/api/restart/status',             desc:'Restart state (ready/restarting/lastFailure)', ex:'Open directly in browser',
     resp:'{"ready":true,"restarting":false,"lastFailure":null}' },
   { m:'GET',  ep:'/api/update/status',              desc:'Update staging status (currentVersion/hasOldFile)', ex:'Open directly in browser',
     resp:'{"staged":true,"hasOldFile":true,"currentVersion":"1.0.6.0","backupAvailable":true}' },
-  { m:'POST', ep:'/api/update/upload',              desc:'Upload an upgrade package (raw binary zip body; package may contain optional top-level dir like "uniflow/"). Binary+wwwroot are staged; appsettings.json is never overwritten. Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'curl -X POST --data-binary @UniFlow-1.0.6.1-win-x64.zip /api/update/upload',
+  { m:'POST', ep:'/api/update/upload',              desc:'Upload an upgrade package (raw binary zip body; package may contain optional top-level dir like "uniflow/"). Binary+wwwroot are staged; appsettings.json is never overwritten. Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'curl -X POST --data-binary @UniFlow-1.0.6.1-win-x64.zip /api/update/upload',
     resp:'{"staged":true,"files":["UniFlow.exe","wwwroot/app.js"],"md5":"274422b1...","hint":"POST /api/update/apply to apply the upgrade."}' },
-  { m:'POST', ep:'/api/update/apply',               desc:'Apply the staged upgrade: backup current binary+wwwroot to backup/<timestamp>/, rename-replace binary (running exe is renamed to *.old), overwrite wwwroot, remove staging. Then POST /api/restart/process to activate. Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'curl -X POST /api/update/apply',
+  { m:'POST', ep:'/api/update/apply',               desc:'Apply the staged upgrade: backup current binary+wwwroot to backup/<timestamp>/, rename-replace binary (running exe is renamed to *.old), overwrite wwwroot, remove staging. Then POST /api/restart/process to activate. Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'curl -X POST /api/update/apply',
     resp:'{"applied":true,"backup":"C:\\\\UniFlow\\\\backup\\\\20260913103658","hint":"..."}' },
   { m:'GET',  ep:'/api/errors?days=3',              desc:'Error records query',                          ex:'?days=<n>&module=<name>&level=<ERROR|WARN> (all optional)',
     resp:'[{"id":1,"timestamp":"...","module":"DmsCleanup","level":"ERROR","message":"..."},...]' },
   { m:'GET',  ep:'/api/errors/summary?days=3',      desc:'Error summary grouped by module/level',        ex:'?days=<n>',
     resp:'{"total":37,"byModule":[{"module":"DisposeSample","count":37}],"byLevel":[...]}' },
-  { m:'DELETE', ep:'/api/errors',                    desc:'Delete ALL error records. Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'No body required',
+  { m:'DELETE', ep:'/api/errors',                    desc:'Delete ALL error records. Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'No body required',
     resp:'{"success":true}' },
   { m:'GET',  ep:'/api/logs/list?days=7',           desc:'Log file list',                                ex:'?days=<n>',
     resp:'[{"path":"2026-09-12/Priority_0.log","name":"Priority_0.log","date":"2026-09-12","size":48211,"lastModified":"..."},...]' },
@@ -613,15 +682,15 @@ const API_DOCS = [
     resp:'Raw log file (Content-Disposition: attachment; filename=Priority_0.log)' },
   { m:'GET',  ep:'/api/logs/bundle?days=7&module=Priority', desc:'Download filtered logs as zip (date folders kept)', ex:'?days=<n>&module=<name> (module optional)',
     resp:'zip file (Content-Disposition: attachment; filename=UniFlow-logs-all-....zip)' },
-  { m:'GET',  ep:'/api/config/download',            desc:'Download full config file as backup (contains secrets, RAW content). Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'Needs auth headers (page button prompts for the admin password; browser <a href> cannot send headers)',
+  { m:'GET',  ep:'/api/config/download',            desc:'Download full config file as backup (contains secrets, RAW content). Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'Needs auth headers (page button prompts for the admin password; browser <a href> cannot send headers)',
     resp:'Raw appsettings.json (Content-Disposition: attachment)' },
   { m:'GET',  ep:'/api/dispose/pending?minResend=24&limit=200', desc:'List dispose records with resendCount >= minResend (503 if resend_count column missing)', ex:'?minResend=<int 0-100000>&limit=<int 1-500> (defaults 24 / 200)',
     resp:'{"minResend":24,"count":3,"pendingSend":12,"pendingConfirm":40,"failedTotal":3,"maxResendCount":24,"resendIntervalMinutes":5,"windowSize":10,"windowFull":false,"items":[{"barcode":"...","send":1,"resendCount":24,...}]}' },
   { m:'POST', ep:'/api/dispose/pending/recheck',    desc:'Recheck dispose status for given barcodes (checks t_sample location)', ex:'{"barcodes":["BC001","BC002"]}',
     resp:'{"checked":2,"disposed":1,"remaining":1,"details":[{"barcode":"BC001","disposed":true},...]}' },
-  { m:'POST', ep:'/api/dispose/pending/reset',      desc:'Reset records to pending-send queue (send=0, resend_count=0). Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'{"barcodes":["BC001"]}',
+  { m:'POST', ep:'/api/dispose/pending/reset',      desc:'Reset records to pending-send queue (send=0, resend_count=0). Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'{"barcodes":["BC001"]}',
     resp:'{"reset":1}' },
-  { m:'POST', ep:'/api/dispose/pending/delete',     desc:'Delete dispose records (requires confirm:true). Auth required: X-Admin-Nonce + X-Admin-Hash', ex:'{"barcodes":["BC001"],"confirm":true}',
+  { m:'POST', ep:'/api/dispose/pending/delete',     desc:'Delete dispose records (requires confirm:true). Auth required: X-Admin-Nonce + X-Admin-Hash (or X-Admin-Token from a previous successful auth, valid WebAdmin:AuthMemoryMinutes minutes)', ex:'{"barcodes":["BC001"],"confirm":true}',
     resp:'{"deleted":1}' },
 ];
 
@@ -630,7 +699,7 @@ function levelText(f) {
   return f.restart === 'process' ? '⚠ 进程级重启' : 'ⓘ 重启业务任务';
 }
 
-const EXAMPLES = {"Aptio:Ip": "\"10.0.0.200\"", "Aptio:Port": "2055", "Aptio:SrmNodeIds": "[\"09\",\"13\"]", "Aptio:Database:Host": "\"192.168.0.44\"", "Aptio:Database:Port": "3306", "Aptio:Database:User": "\"root\"", "Aptio:Database:Password": "\"***\" (string)", "Aptio:Database:Database": "\"flexlab\"", "Aptio:DisposeSample:CommandType": "0", "Aptio:DisposeSample:CommandName": "\"view_overtimestoragesample\"", "Aptio:DisposeSample:RunDays": "[1,3,5]", "Aptio:DisposeSample:TimeRanges": "[{\"Start\":\"01:30\",\"End\":\"05:45\",\"Threshold\":3800},{\"Start\":\"18:00\",\"End\":\"07:00\",\"Threshold\":7500}]", "Aptio:DisposeSample:LoopIntervalSeconds": "3", "Aptio:DisposeSample:MaxWaitDiscardCount": "2", "Aptio:DisposeSample:MaxOnetimeSelectDiscardCount": "10", "Aptio:DisposeSample:DisposeByRack": "true / false", "Aptio:DisposeSample:EnableFastFill": "true / false", "Aptio:DisposeSample:FastFillIntervalMs": "1000", "Aptio:DisposeSample:FastFillConfirmIntervalSeconds": "5", "Aptio:DisposeSample:AllowedSrmErrorCodes": "[\"0000\",\"0F0A\",\"0E59\",\"AAAA\"]", "Aptio:DisposeSample:SkipOnUnknownNode": "true / false", "Aptio:DisposeSample:AllowStandbyDispose": "true / false", "Aptio:DisposeSample:ResendIntervalMinutes": "5", "Aptio:DisposeSample:MaxResendCount": "24", "Aptio:DisposeSample:MaxPendingRecords": "0", "Aptio:DisposeSample:PendingWarnThreshold": "1000", "Aptio:SrmExport:ExportTime": "\"05:30\"", "Aptio:SrmExport:LoopIntervalSeconds": "60", "Aptio:SrmExport:LogRetentionDays": "30", "Aptio:SrmExport:OutputPath": "\"D:\\\\exports\" or \"/data/exports\"", "Aptio:Delivery:TestName": "\"TG\"", "Aptio:Priority:TestName": "\"FT3\"", "Aptio:TestNameDispose:DisposeTestName": "\"FT4\"", "Aptio:DeliveryFile:DeliveryListFilePath": "\"D:\\\\list\"", "Aptio:DeliveryFile:LoopIntervalSeconds": "60", "Aptio:BatchScan:LoopIntervalSeconds": "60", "Aptio:BatchScan:MaxOnetimeScanCount": "500", "DMS:DbHost": "\"10.0.0.100\"", "DMS:DbPort": "3306", "DMS:DbUser": "\"fse\"", "DMS:DbPassword": "\"***\" (string)", "DMS:DbName": "\"DMSCN\"", "DMS:LoopIntervalSeconds": "60", "DMS:StatusCorrection:AutoModifyTestStatus": "\"1\" / \"2\" / \"3\"", "DMS:StatusCorrection:IgnoreFlags": "[\"HIL\",\"LIPX\"]", "DMS:SampleCleanup:TriggerRules": "[{\"TestName\":\"RMSMP\",\"TimeoutMinutes\":1}]", "DMS:SampleCleanup:SendCancelMessageToAptio": "true / false", "DMS:SampleCleanup:AptioAction": "\"None\" / \"Cancel\" / \"Complete\"", "DMS:PitStop:TimeoutMinutes": "1", "WebAdmin:BindIp": "\"0.0.0.0\"", "WebAdmin:Port": "5100", "WebAdmin:ErrorRetentionDays": "30", "WebAdmin:HealthCheckIntervalSeconds": "60", "Logging:LogLevel:Default": "\"Information\"", "Logging:LogLevel:UniFlow": "\"Information\"", "Logging:LogLevel:Microsoft.Hosting.Lifetime": "\"Warning\"", "Logging:UniFlowFile:FileLoggingEnabled": "true / false", "Logging:UniFlowFile:LogDirectory": "\"logs\"", "Logging:UniFlowFile:MaxFileSizeMb": "10", "Logging:UniFlowFile:RetentionDays": "30", "Logging:UniFlowFile:LogLevel": "\"Information\""};
+const EXAMPLES = {"Aptio:Ip": "\"10.0.0.200\"", "Aptio:Port": "2055", "Aptio:SrmNodeIds": "[\"09\",\"13\"]", "Aptio:Database:Host": "\"192.168.0.44\"", "Aptio:Database:Port": "3306", "Aptio:Database:User": "\"root\"", "Aptio:Database:Password": "\"***\" (string)", "Aptio:Database:Database": "\"flexlab\"", "Aptio:DisposeSample:CommandType": "0", "Aptio:DisposeSample:CommandName": "\"view_overtimestoragesample\"", "Aptio:DisposeSample:RunDays": "[1,3,5]", "Aptio:DisposeSample:TimeRanges": "[{\"Start\":\"01:30\",\"End\":\"05:45\",\"Threshold\":3800},{\"Start\":\"18:00\",\"End\":\"07:00\",\"Threshold\":7500}]", "Aptio:DisposeSample:LoopIntervalSeconds": "3", "Aptio:DisposeSample:MaxWaitDiscardCount": "2", "Aptio:DisposeSample:MaxOnetimeSelectDiscardCount": "10", "Aptio:DisposeSample:DisposeByRack": "true / false", "Aptio:DisposeSample:EnableFastFill": "true / false", "Aptio:DisposeSample:FastFillIntervalMs": "1000", "Aptio:DisposeSample:FastFillConfirmIntervalSeconds": "5", "Aptio:DisposeSample:AllowedSrmErrorCodes": "[\"0000\",\"0F0A\",\"0E59\",\"AAAA\"]", "Aptio:DisposeSample:SkipOnUnknownNode": "true / false", "Aptio:DisposeSample:AllowStandbyDispose": "true / false", "Aptio:DisposeSample:ResendIntervalMinutes": "5", "Aptio:DisposeSample:MaxResendCount": "24", "Aptio:DisposeSample:MaxPendingRecords": "0", "Aptio:DisposeSample:PendingWarnThreshold": "1000", "Aptio:SrmExport:ExportTime": "\"05:30\"", "Aptio:SrmExport:LoopIntervalSeconds": "60", "Aptio:SrmExport:LogRetentionDays": "30", "Aptio:SrmExport:OutputPath": "\"D:\\\\exports\" or \"/data/exports\"", "Aptio:Delivery:TestName": "\"TG\"", "Aptio:Priority:TestName": "\"FT3\"", "Aptio:TestNameDispose:DisposeTestName": "\"FT4\"", "Aptio:DeliveryFile:DeliveryListFilePath": "\"D:\\\\list\"", "Aptio:DeliveryFile:LoopIntervalSeconds": "60", "Aptio:BatchScan:LoopIntervalSeconds": "60", "Aptio:BatchScan:MaxOnetimeScanCount": "500", "DMS:DbHost": "\"10.0.0.100\"", "DMS:DbPort": "3306", "DMS:DbUser": "\"fse\"", "DMS:DbPassword": "\"***\" (string)", "DMS:DbName": "\"DMSCN\"", "DMS:LoopIntervalSeconds": "60", "DMS:StatusCorrection:AutoModifyTestStatus": "\"1\" / \"2\" / \"3\"", "DMS:StatusCorrection:IgnoreFlags": "[\"HIL\",\"LIPX\"]", "DMS:SampleCleanup:TriggerRules": "[{\"TestName\":\"RMSMP\",\"TimeoutMinutes\":1}]", "DMS:SampleCleanup:SendCancelMessageToAptio": "true / false", "DMS:SampleCleanup:AptioAction": "\"None\" / \"Cancel\" / \"Complete\"", "DMS:PitStop:TimeoutMinutes": "1", "WebAdmin:BindIp": "\"0.0.0.0\"", "WebAdmin:Port": "5100", "WebAdmin:ErrorRetentionDays": "30", "WebAdmin:HealthCheckIntervalSeconds": "60", "WebAdmin:AuthMemoryMinutes": "5", "Logging:LogLevel:Default": "\"Information\"", "Logging:LogLevel:UniFlow": "\"Information\"", "Logging:LogLevel:Microsoft.Hosting.Lifetime": "\"Warning\"", "Logging:UniFlowFile:FileLoggingEnabled": "true / false", "Logging:UniFlowFile:LogDirectory": "\"logs\"", "Logging:UniFlowFile:MaxFileSizeMb": "10", "Logging:UniFlowFile:RetentionDays": "30", "Logging:UniFlowFile:LogLevel": "\"Information\""};
 const TYPE_CN = { text:'文本', number:'数字', switch:'开关', select:'下拉', tags:'标签列表', rows:'表格行', weekdays:'星期勾选', password:'密码' };
 function loadConfigFieldsTable() {
   const tbody = document.getElementById('cfgFieldsBody');
@@ -758,6 +827,7 @@ const FORM_FIELDS = [
   { section:'Web 管理界面', path:'WebAdmin:Port', label:'端口', type:'number', min:1, max:65535, restart:'process', hint:'Web 界面端口' },
   { section:'Web 管理界面', path:'WebAdmin:ErrorRetentionDays', label:'错误保留天数', type:'number', min:1, restart:'process', hint:'管理库（健康+错误）记录保留天数' },
   { section:'Web 管理界面', path:'WebAdmin:HealthCheckIntervalSeconds', label:'健康检查间隔(秒)', type:'number', min:5, restart:'process', hint:'System 徽标与清理任务的心跳周期' },
+  { section:'Web 管理界面', path:'WebAdmin:AuthMemoryMinutes', label:'管理验证记忆(分钟)', type:'number', min:0, max:60, hint:'默认 5：一次密码后 5 分钟内后续破坏性操作不再弹；0=每次操作都弹。令牌只存服务端/浏览器内存，刷新页面、改密码、重启后失效。' },
   // —— 日志 ——
   { section:'日志', path:'Logging:LogLevel:Default', label:'默认日志级别', type:'select', options:[['Trace','Trace'],['Debug','Debug'],['Information','Information'],['Warning','Warning'],['Error','Error']], hint:'全局默认日志级别，保存后热生效' },
   { section:'日志', path:'Logging:LogLevel:UniFlow', label:'UniFlow 日志级别', type:'select', options:[['Trace','Trace'],['Debug','Debug'],['Information','Information'],['Warning','Warning'],['Error','Error']], hint:'业务模块日志级别，保存后热生效' },
@@ -1331,6 +1401,9 @@ function downloadLogBundle() {
 // （<a href>/window.location 带不了自定义 header，不能再直接跳转）
 // 401 = 密码错误/挑战过期 → 允许重新输入并换新 nonce 重试一次；
 // 403 = 后端未配置管理密码 → 明确提示，不重试；其余失败均有明确文案，不静默。
+// 安全口径：下载返回的是**含全部明文密码**的配置文件，属敏感度最高的动作 ——
+//   ① 始终重新输入密码（不借用「管理验证记忆」令牌）；
+//   ② 不从下载响应里采纳新令牌（不因一次下载延长信任窗口）。
 async function downloadConfig() {
   const hint = document.getElementById('formsHint');
   const setHint = (msg, red) => {
@@ -1338,7 +1411,7 @@ async function downloadConfig() {
     hint.textContent = msg;
     hint.style.color = red ? 'var(--red, #d9534f)' : '';
   };
-  const holder = adminAuth('下载配置原文');               // 一次下载 = 弹一次密码
+  const holder = adminAuth('下载配置原文', { forcePrompt: true });   // 一次下载 = 弹一次密码
   if (!holder) { setHint('已取消，未下载'); return; }     // 取消 → 中止，不发请求
   const once = async () => {
     let ch;
@@ -1353,10 +1426,11 @@ async function downloadConfig() {
   };
   let out = await once();
   if (out.status === 401) {
-    // 管理密码错误/挑战过期：允许重新输入（取消=中止），换新 nonce 重试一次
-    const again = prompt('管理密码错误或挑战过期，请重新输入（取消 = 中止下载）');
-    if (again === null) { setHint('已取消，未下载'); return; }
-    if (again !== '') holder.pw = again;
+    // 管理密码错误/挑战过期：允许重新输入（取消或留空 = 中止下载），换新 nonce 重试一次。
+    // 留空不再沿用上一次的（可能就是错的）密码重试 —— 必然再 401 一次、白耗一次尝试。
+    const again = prompt('管理密码错误或挑战过期，请重新输入（留空/取消 = 中止下载）');
+    if (again === null || again === '') { setHint('已取消，未下载'); return; }
+    holder.pw = again;
     out = await once();
   }
   if (out.transportError) { setHint(out.transportError, true); return; }
@@ -1478,7 +1552,7 @@ async function pollRestartBack(tries = 30) {
 }
 
 // ===== Update (online upgrade) =====
-// XHR 上传（fetch 无上传进度回调）。headers：含 X-Admin-Nonce/X-Admin-Hash 的鉴权头。
+// XHR 上传（fetch 无上传进度回调）。headers：含 X-Admin-Nonce/X-Admin-Hash 或 X-Admin-Token 的鉴权头。
 function uploadUpdateWithProgress(file, headers, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -1486,7 +1560,13 @@ function uploadUpdateWithProgress(file, headers, onProgress) {
     Object.entries(headers || {}).forEach(([k, v]) => { try { xhr.setRequestHeader(k, v); } catch (e) { /* 禁止头名忽略 */ } });
     xhr.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     xhr.onerror = () => reject(new Error('network error'));
-    xhr.onload = () => resolve({ status: xhr.status, json: () => JSON.parse(xhr.responseText || '{}') });
+    xhr.onload = () => resolve({
+      status: xhr.status,
+      json: () => JSON.parse(xhr.responseText || '{}'),
+      // 服务端可能下发「管理验证记忆」短令牌（同一动作的 apply 直接复用，不必再弹密码）
+      token: xhr.getResponseHeader('X-Admin-Token'),
+      tokenExpiresIn: xhr.getResponseHeader('X-Admin-Token-Expires-In'),
+    });
     xhr.send(file);
   });
 }
@@ -1500,16 +1580,18 @@ async function uploadUpdate(file) {
   hint.style.color = 'var(--blue, #3399ff)';
   hint.textContent = '⏳ 上传中...';
   try {
-    // upload：发送前取一次性新 nonce，鉴权头加到 xhr.setRequestHeader
-    let ch;
-    try { ch = await (await fetch(BASE + '/auth/challenge')).json(); }
-    catch (e) { hint.style.color = 'var(--red, #d9534f)'; hint.textContent = '❌ 无法获取鉴权挑战（/api/auth/challenge 不可达）'; return; }
-    const headers = { 'X-Admin-Nonce': ch.nonce, 'X-Admin-Hash': sha256Hex(holder.pw + ch.nonce) };
-    let resp = await uploadUpdateWithProgress(file, headers, p => {
+    // upload：鉴权头（有有效短令牌 → 只带 X-Admin-Token；否则取一次性新 nonce 现算 hash）
+    let auth = await buildAuthHeaders(holder);
+    if (auth.error) {
+      hint.style.color = 'var(--red, #d9534f)';
+      hint.textContent = auth.error === 'nopw' ? '❌ 需要管理密码（验证记忆已失效）' : '❌ 无法获取鉴权挑战（/api/auth/challenge 不可达）';
+      return;
+    }
+    let resp = await uploadUpdateWithProgress(file, auth.headers, p => {
       const pct = Math.round(p * 100);
       hint.textContent = `⏳ 上传中... ${pct}%`;
     });
-    // 401 = 密码错误/挑战过期 → 允许重输一次密码、换新 nonce 重传（仍属同一动作）；
+    // 401 = 密码错误/挑战过期/令牌失效 → 允许重输一次密码、换新 nonce 重传（仍属同一动作）；
     // 403 = 后端未配置管理密码 → 重传必然同样失败，直接停止，不重传整包。
     if (resp.status === 403) {
       hint.textContent = '❌ ' + authErrMsg({ status: 403 }) + '，已停止，未重传';
@@ -1517,13 +1599,19 @@ async function uploadUpdate(file) {
       return;
     }
     if (resp.status === 401) {
-      const again = prompt('管理密码错误或挑战过期，请重新输入（取消 = 中止上传）');
-      if (again === null) { hint.style.color = ''; hint.textContent = '已取消，未执行'; return; }
-      if (again === '') { hint.style.color = ''; hint.textContent = '已取消，未执行'; return; }
+      // 令牌无效/过期 → 丢弃令牌，改用「密码 + 一次性 nonce」重新鉴权
+      if (auth.usedToken) clearAdminToken(holder);
+      const again = prompt('管理密码错误或验证已过期，请重新输入（留空/取消 = 中止上传）');
+      if (again === null || again === '') { hint.style.color = ''; hint.textContent = '已取消，未执行'; return; }
       holder.pw = again;
-      try { ch = await (await fetch(BASE + '/auth/challenge')).json(); }
-      catch (e) { hint.style.color = 'var(--red, #d9534f)'; hint.textContent = '❌ 无法获取鉴权挑战'; return; }
-      resp = await uploadUpdateWithProgress(file, { 'X-Admin-Nonce': ch.nonce, 'X-Admin-Hash': sha256Hex(holder.pw + ch.nonce) }, p => {
+      holder.token = null;
+      auth = await buildAuthHeaders(holder);
+      if (auth.error) {
+        hint.style.color = 'var(--red, #d9534f)';
+        hint.textContent = '❌ 无法获取鉴权挑战';
+        return;
+      }
+      resp = await uploadUpdateWithProgress(file, auth.headers, p => {
         const pct = Math.round(p * 100);
         hint.textContent = `⏳ 上传中... ${pct}%`;
       });
@@ -1536,8 +1624,10 @@ async function uploadUpdate(file) {
       hint.style.color = 'var(--red, #d9534f)';
       return;
     }
+    // 上传成功 → 采纳服务端下发的短令牌（apply 直接复用，不再取 nonce/弹密码）
+    rememberAdminToken(resp.token, resp.tokenExpiresIn, holder);
     hint.textContent = '📦 已暂存 (md5: ' + r.md5.slice(0, 8) + ')。正在应用...';
-    // apply：同一动作复用密码，但按「一次请求一个新 nonce」再取一次挑战
+    // apply：同一动作复用密码/令牌（authFetch 内部：有令牌走令牌，否则按「一次请求一个新 nonce」取挑战）
     const res = await authFetch(holder, '/update/apply', { method: 'POST' });
     if (!res.ok) {
       const am = authErrMsg(res);
